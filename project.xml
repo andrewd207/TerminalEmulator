@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <name>TerminalEmulatorAgregator</name>
+  <version>1.0.0</version>
+  <author>Andrew Haines</author>
+  <license>BSD-3-Clause</license>
+
+  <build>
+    <packaging>pom</packaging>
+  </build>
+
+  <modules>
+    <module>ExampleTerminal</module>
+    <module>TerminalFramework</module>
+  </modules>
+
+<profiles>
+    <profile>
+      <id>debug</id>
+      <defines>
+        <define>DEBUG</define>
+      </defines>
+      <compilerOptions>
+        <option>-gw</option>
+        <option>-gl</option>
+        <option>-O-</option>
+      </compilerOptions>
+    </profile>
+</profiles>
+</project>
