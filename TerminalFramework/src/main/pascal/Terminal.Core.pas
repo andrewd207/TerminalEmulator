@@ -976,13 +976,10 @@ begin
   begin
     if FAutoWrap then
     begin
-      if FCursor.Row < FRows - 1 then
-      begin
-        if FCursor.Row = FBottomMargin then
-          ActiveBuffer.ScrollUp(FTopMargin, FBottomMargin, 1)
-        else
-          Inc(FCursor.Row);
-      end;
+      if FCursor.Row = FBottomMargin then
+        ActiveBuffer.ScrollUp(FTopMargin, FBottomMargin, 1)
+      else if FCursor.Row < FRows - 1 then
+        Inc(FCursor.Row);
       FCursor.Col := 0;
       if ActiveBuffer.InBounds(0, FCursor.Row) then
         Include(ActiveBuffer.FLines[FCursor.Row].Flags, tlfWrapped);
