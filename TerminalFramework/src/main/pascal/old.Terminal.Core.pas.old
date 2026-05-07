@@ -1,4 +1,5 @@
 unit Terminal.Core;
+
 {$mode objfpc}{$H+}
 {$ModeSwitch advancedrecords}
 {$ModeSwitch typehelpers}
@@ -6,9 +7,7 @@ unit Terminal.Core;
 interface
 
 uses
-  Classes, SysUtils, fgl,
-  Terminal.Unicode,
-  Terminal.Core.Ringbuffer;
+  Classes, SysUtils, Terminal.Unicode;
 
 const
   TERM_DEFAULT_TAB_WIDTH = 8;
@@ -16,38 +15,37 @@ const
   TERM_DEFAULT_BG = $000000;
 
 type
+  TTermColorMode = (tcmDefault, tcmIndexed, tcmRGB);
 
-   TTermColorMode = (tcmDefault, tcmIndexed, tcmRGB);
+  TTermAttrFlag = (
+    tafBlank, { unset cell. returns #32 ' ' }
+    tafBold,
+    tafFaint,
+    tafItalic,
+    tafUnderline,
+    tafBlink,
+    tafInverse,
+    tafHidden,
+    tafStrike,
+    tafDirty,
+    tafWideLead,
+    tafWideTrail
+  );
+  TTermAttrFlags = set of TTermAttrFlag;
 
- TTermAttrFlag = (
-   tafBlank, { unset cell. returns #32 ' ' }
-   tafBold,
-   tafFaint,
-   tafItalic,
-   tafUnderline,
-   tafBlink,
-   tafInverse,
-   tafHidden,
-   tafStrike,
-   tafDirty,
-   tafWideLead,
-   tafWideTrail
- );
- TTermAttrFlags = set of TTermAttrFlag;
+  TTermColor = record
+    Mode: TTermColorMode;
+    Index: Byte;
+    R: Byte;
+    G: Byte;
+    B: Byte;
+  end;
 
- TTermColor = record
-   Mode: TTermColorMode;
-   Index: Byte;
-   R: Byte;
-   G: Byte;
-   B: Byte;
- end;
+  TTermCodePointArray = array of Cardinal;
 
- TTermCodePointArray = array of Cardinal;
+  { TTermCell }
 
- { TTermCell }
-
- TTermCell = record
+  TTermCell = record
   private
     procedure SetCodePoint(AValue: Cardinal);
   public
@@ -57,35 +55,24 @@ type
     Attrs: TTermAttrFlags;
     FG: TTermColor;
     BG: TTermColor;
-
-    class operator Initialize(var ADest: TTermCell);
-    class operator Finalize(var ADest: TTermCell);
-    class operator Copy(constref ASrc: TTermCell; var ADest: TTermCell);
-
-    function IsBlank: Boolean;
+    function isBlank: Boolean;
     property CodePoint: Cardinal read FCodePoint write SetCodePoint;
   end;
- PTermCell = ^TTermCell;
+  PTermCell = ^TTermCell;
 
-  { TTermCellLine }
-
-  // A line posibly longer that the width of the terminal. it returns it's line as several lines if needed.
-
-  { TTermLine }
-
-  type
   TTermCellLine = array of TTermCell;
+
+  { TTermCellLineHelper }
 
   TTermCellLineHelper = type helper for TTermCellLine
     function UsedLength: Integer;
-    procedure FillBlanks(ACols: Integer; const ABlank: TTermCell);
-    procedure ClearToBlank(const ABlank: TTermCell);
-    function MakeCopy(NewColumnCount: Integer; const ABlank: TTermCell): TTermCellLine;
   end;
 
   TTermLineFlags = set of (
-    tlfWrapped
+    tlfWrapped   // this row continues from the previous row due to soft wrap
   );
+
+
 
   TTermLine = record
     Cells: TTermCellLine;
@@ -95,36 +82,19 @@ type
   { TTermLineHelper }
 
   TTermLineHelper = type helper for TTermLine
-    procedure Init(ACols: Integer; const ACellValue: TTermCell);
-    procedure Clear(const ABlank: TTermCell);
-    function MakeResizedCopy(NewColumnCount: Integer; const ABlank: TTermCell): TTermLine;
-    function AsPlainText: UTF8String;
+    procedure Init(ACols: Integer; var ACellValue: TTermCell);
   end;
 
-  TTermLines = array of TTermLine;
+  { TTermLines }
+
+  TTermLines = Array of TTermLine;
+
+  { TTermLinesHelper }
 
   TTermLinesHelper = type helper for TTermLines
     function Length: Integer;
     function MakeCopy(NewColumnCount: Integer; var ABlank: TTermCell): TTermLines;
-    procedure Init(ALineCount, ACols: Integer; var ABlank: TTermCell);
-    procedure Clear(const ABlank: TTermCell);
   end;
-
-
-  { TTermHistoryLine }
-
-  TTermHistoryLine = class
-  private
-    FLine: TTermLine;
-    function GetAsPlainText: UTF8String;
-  public
-    constructor Create(const ALine: TTermLine);
-    destructor Destroy; override;
-    property Line: TTermLine read FLine;
-    property AsPlainText: UTF8String read GetAsPlainText;
-  end;
-
-  TTermHistoryRing = specialize TRingBuffer<TTermHistoryLine>;
 
   TTermCursor = record
     Col: Integer;
@@ -173,17 +143,16 @@ type
     FRows: Integer;
     FScrollbackLimit: Integer;
     FLines: TTermLines;
-    FHistory: TTermHistoryRing;
+    FHistory: TTermLines;
+    FHistoryStart: Integer;
+    FHistoryCount: Integer;
     FBlankCell: TTermCell;
-    function GetHistoryCount: Integer;
-    procedure RecreateHistory;
     procedure SetSizeInternal(ACols: Integer; ARows: Integer; Preserve: Boolean);
     procedure InitBlankCell;
     procedure SetBlankCell(const ACell: TTermCell);
     procedure AppendHistory(const ALine: TTermLine);
   public
     constructor Create(ACols, ARows, AScrollbackLimit: Integer);
-    destructor Destroy; override;
     procedure Resize(ACols: Integer; ARows: Integer; Preserve: Boolean = True);
     procedure Clear;
     procedure ClearRow(ARow: Integer);
@@ -196,9 +165,11 @@ type
     property Cols: Integer read FCols;
     property Rows: Integer read FRows;
     property ScrollbackLimit: Integer read FScrollbackLimit write FScrollbackLimit;
-    property HistoryCount: Integer read GetHistoryCount;
+    property HistoryCount: Integer read FHistoryCount;
     property BlankCell: TTermCell read FBlankCell write SetBlankCell;
   end;
+
+  { TTerminalCore }
 
   TTerminalCore = class
   private
@@ -322,7 +293,6 @@ type
     property OnWrite: TTerminalWriteEvent read FOnWrite write FOnWrite;
   end;
 
-
 procedure TermNormalizeSelection(const A, B: TTermCellPos; out S, E: TTermCellPos);
 function TermDefaultColorFG: TTermColor;
 function TermDefaultColorBG: TTermColor;
@@ -331,7 +301,7 @@ function TermRGBColor(ARed, AGreen, ABlue: Byte): TTermColor;
 function TermColorToRGB(const AColor: TTermColor): Cardinal;
 function TermBlankCell(const APen: TTermPen): TTermCell;
 
-
+operator = (const A,B: TTermCellPos): Boolean;
 
 implementation
 
@@ -346,11 +316,11 @@ const
     $0000FF, $FF00FF, $00FFFF, $FFFFFF
   );
 
+
 operator = (const A,B: TTermCellPos): Boolean;
 begin
   Result := (A.Col = B.Col) and (A.Row = B.Row);
 end;
-
 
 procedure TermNormalizeSelection(const A, B: TTermCellPos; out S, E: TTermCellPos);
 begin
@@ -435,13 +405,14 @@ begin
   end;
 end;
 
-
 function TermBlankCell(const APen: TTermPen): TTermCell;
 begin
-  Result.FCodePoint := Ord(' ');
-  Result.Cluster := '';
+  Result.FCodePoint := MaxInt;// Ord(' ');
+  Result.Cluster := ' ';
   SetLength(Result.Combining, 0);
-  Result.Attrs := APen.Attrs;
+  Result.Attrs := APen.Attrs + [tafDirty, tafBlank];
+  Exclude(Result.Attrs, tafWideLead);
+  Exclude(Result.Attrs, tafWideTrail);
   Result.FG := APen.FG;
   Result.BG := APen.BG;
 end;
@@ -450,364 +421,401 @@ end;
 
 procedure TTermCell.SetCodePoint(AValue: Cardinal);
 begin
-  FCodePoint := AValue;
+  if FCodePoint=AValue then Exit;
+  FCodePoint:=AValue;
+  Exclude(Attrs, tafBlank);
+  Include(Attrs, tafDirty);
 end;
 
-function TTermCell.IsBlank: Boolean;
+function TTermCell.isBlank: Boolean;
 begin
-  Result :=
-    (FCodePoint = Ord(' ')) and
-    (Cluster = '') and
-    (Length(Combining) = 0);
+  Result := tafBlank in Attrs;
 end;
 
-class operator TTermCell.Initialize(var ADest: TTermCell);
-begin
-  ADest.FCodePoint := Ord(' ');
-  ADest.Cluster := '';
-  SetLength(ADest.Combining, 0);
-  ADest.Attrs := [];
-  ADest.FG := TermDefaultColorFG;
-  ADest.BG := TermDefaultColorBG;
-end;
-
-class operator TTermCell.Finalize(var ADest: TTermCell);
-begin
-  ADest.Cluster := '';
-  SetLength(ADest.Combining, 0);
-  ADest.Attrs := [];
-  ADest.FCodePoint := 0;
-  ADest.FG := Default(TTermColor);
-  ADest.BG := Default(TTermColor);
-end;
-
-class operator TTermCell.Copy(constref ASrc: TTermCell; var ADest: TTermCell);
-begin
-  ADest.FCodePoint := ASrc.FCodePoint;
-  ADest.Cluster := Copy(ASrc.Cluster, 1, MaxInt);
-  ADest.Combining := Copy(ASrc.Combining, 0, Length(ASrc.Combining));
-  ADest.Attrs := ASrc.Attrs;
-  ADest.FG := ASrc.FG;
-  ADest.BG := ASrc.BG;
-end;
-
-
-{ TTermLine }
+{ TTermCellLineHelper }
 
 function TTermCellLineHelper.UsedLength: Integer;
 begin
-  Result := System.Length(Self);
-  while (Result > 0) and Self[Result - 1].IsBlank do
-    Dec(Result);
+  Result := Length(Self);
+  //while (Result > 0) and (tafBlank in Self[Result - 1].Attrs) do  Dec(Result);
+  while (Result > 0) and (Self[Result-1].CodePoint = MaxInt) do  Dec(Result);
 end;
 
-procedure TTermCellLineHelper.FillBlanks(ACols: Integer; const ABlank: TTermCell);
-var
-  I: Integer;
-begin
-  SetLength(Self, ACols);
-  for I := 0 to ACols - 1 do
-    Self[I] := ABlank;
-end;
+{ TTermLineHelper }
 
-procedure TTermCellLineHelper.ClearToBlank(const ABlank: TTermCell);
-var
-  I: Integer;
-begin
-  for I := 0 to High(Self) do
-    Self[I] := ABlank;
-end;
-
-function TTermCellLineHelper.MakeCopy(NewColumnCount: Integer; const ABlank: TTermCell): TTermCellLine;
-var
-  CopyCount: Integer;
-  I: Integer;
-begin
-  if NewColumnCount < 0 then
-    NewColumnCount := 0;
-
-  SetLength(Result, NewColumnCount);
-
-  for I := 0 to NewColumnCount - 1 do
-    Result[I] := ABlank;
-
-  if Length(Self) < NewColumnCount then
-    CopyCount := Length(Self)
-  else
-    CopyCount := NewColumnCount;
-
-  for I := 0 to CopyCount - 1 do
-    Result[I] := Self[I];
-end;
-
-procedure TTermLineHelper.Init(ACols: Integer; const ACellValue: TTermCell);
-var
-  I: Integer;
-begin
-  if ACols < 0 then
-    ACols := 0;
-
-  SetLength(Self.Cells, ACols);
-  for I := 0 to ACols - 1 do
-    Self.Cells[I] := ACellValue;
-
-  Self.Flags := [];
-end;
-
-procedure TTermLineHelper.Clear(const ABlank: TTermCell);
-var
-  I: Integer;
-begin
-  for I := 0 to High(Self.Cells) do
-    Self.Cells[I] := ABlank;
-  Self.Flags := [];
-end;
-
-function TTermLineHelper.MakeResizedCopy(NewColumnCount: Integer; const ABlank: TTermCell): TTermLine;
-begin
-  Result.Cells := Cells.MakeCopy(NewColumnCount, ABlank);
-  Result.Flags := Flags;
-end;
-
-function TTermLineHelper.AsPlainText: UTF8String;
+procedure TTermLineHelper.Init(ACols: Integer; var ACellValue: TTermCell);
 var
   i: Integer;
 begin
-  Result := '';
+  SetLength(Self.Cells, ACols);
   for i := 0 to High(Self.Cells) do
-    Result := Result+Self.Cells[i].Cluster;
+    Self.Cells[i] := ACellValue;
 end;
 
+{ TTermLinesHelper }
 
 function TTermLinesHelper.Length: Integer;
 begin
   Result := System.Length(Self);
 end;
 
-procedure TTermLinesHelper.Init(ALineCount, ACols: Integer; var ABlank: TTermCell);
+function TTermLinesHelper.MakeCopy(NewColumnCount: Integer;
+  var ABlank: TTermCell): TTermLines;
 var
-  I: Integer;
+  SrcLine, DstLine: Integer;
+  SrcUsed, SrcPos: Integer;
+  DstPos: Integer;
+  NeedLines: Integer;
+  Available: Integer;
+  ToCopy, i: Integer;
+  ContinueWrap: Boolean;
 begin
-  SetLength(Self, ALineCount);
-  for I := 0 to ALineCount - 1 do
-    Self[I].Init(ACols, ABlank);
+  SetLength(Result, 0);
+
+  if NewColumnCount <= 0 then
+    Exit;
+
+  if Length = 0 then
+    Exit;
+
+  { Pass 1: count how many destination lines are needed }
+  NeedLines := 0;
+  DstPos := 0;
+  ContinueWrap := False;
+
+  for SrcLine := 0 to High(Self) do
+  begin
+    SrcUsed := Self[SrcLine].Cells.UsedLength;
+
+    if (not ContinueWrap) or (not (tlfWrapped in Self[SrcLine].Flags)) then
+    begin
+      Inc(NeedLines);
+      DstPos := 0;
+    end;
+
+    SrcPos := 0;
+    while SrcPos < SrcUsed do
+    begin
+      Available := NewColumnCount - DstPos;
+      if Available <= 0 then
+      begin
+        Inc(NeedLines);
+        DstPos := 0;
+        Available := NewColumnCount;
+      end;
+
+      ToCopy := SrcUsed - SrcPos;
+      if ToCopy > Available then
+        ToCopy := Available;
+
+      Inc(SrcPos, ToCopy);
+      Inc(DstPos, ToCopy);
+
+      if SrcPos < SrcUsed then
+      begin
+        Inc(NeedLines);
+        DstPos := 0;
+      end
+      else if DstPos = NewColumnCount then
+        DstPos := 0;
+    end;
+
+    ContinueWrap := tlfWrapped in Self[SrcLine].Flags;
+  end;
+
+  SetLength(Result, NeedLines);
+
+  { Initialize result lines }
+  for DstLine := 0 to High(Result) do
+  begin
+    SetLength(Result[DstLine].Cells, NewColumnCount);
+    Result[DstLine].Flags := [];
+  end;
+
+  { Pass 2: actually copy }
+  DstLine := -1;
+  DstPos := 0;
+  ContinueWrap := False;
+
+  for SrcLine := 0 to High(Self) do
+  begin
+    SrcUsed := Self[SrcLine].Cells.UsedLength;
+
+    if (not ContinueWrap) or (not (tlfWrapped in Self[SrcLine].Flags)) then
+    begin
+      Inc(DstLine);
+      DstPos := 0;
+    end;
+
+    SrcPos := 0;
+    while SrcPos < SrcUsed do
+    begin
+      Available := NewColumnCount - DstPos;
+      if Available <= 0 then
+      begin
+        Inc(DstLine);
+        DstPos := 0;
+        Available := NewColumnCount;
+        Include(Result[DstLine].Flags, tlfWrapped);
+      end;
+
+      ToCopy := SrcUsed - SrcPos;
+      if ToCopy > Available then
+        ToCopy := Available;
+
+      for i := 0 to ToCopy-1 do
+      Result[DstLine].Cells[DstPos+i] := Self[SrcLine].Cells[SrcPos+i];
+      {Move(
+        Self[SrcLine].Cells[SrcPos],
+        Result[DstLine].Cells[DstPos],
+        ToCopy * SizeOf(TTermCell)
+      );}
+
+      // add 'blank' cells to fill it
+      if Self.Length < NewColumnCount then
+        for i := Self.Length to NewColumnCount-1 do
+          Result[DstLine].Cells[i] := ABlank;
+
+      Inc(SrcPos, ToCopy);
+      Inc(DstPos, ToCopy);
+
+      if SrcPos < SrcUsed then
+      begin
+        Inc(DstLine);
+        DstPos := 0;
+        Include(Result[DstLine].Flags, tlfWrapped);
+      end;
+    end;
+
+    ContinueWrap := tlfWrapped in Self[SrcLine].Flags;
+  end;
 end;
-
-function TTermLinesHelper.MakeCopy(NewColumnCount: Integer; var ABlank: TTermCell): TTermLines;
-var
-  I: Integer;
-begin
-  SetLength(Result, System.Length(Self));
-  for I := 0 to High(Self) do
-    Result[I] := Self[I].MakeResizedCopy(NewColumnCount, ABlank);
-end;
-
-procedure TTermLinesHelper.Clear(const ABlank: TTermCell);
-var
-  I: Integer;
-begin
-  for I := 0 to High(Self) do
-    Self[I].Clear(ABlank);
-end;
-
-{ TTermHistoryLine }
-
-function TTermHistoryLine.GetAsPlainText: UTF8String;
-var
-  i: Integer;
-begin
-  Result := '';
-  for i := 0 to High(FLine.Cells) do
-    Result := Result +FLine.Cells[i].Cluster;
-end;
-
-constructor TTermHistoryLine.Create(const ALine: TTermLine);
-begin
-  inherited Create;
-  FLine := ALine.MakeResizedCopy(System.Length(ALine.Cells), Default(TTermCell));
-end;
-
-destructor TTermHistoryLine.Destroy;
-begin
-  FLine.Clear(Default(TTermCell));
-  inherited Destroy;
-end;
-
 
 constructor TTermScreenBuffer.Create(ACols, ARows, AScrollbackLimit: Integer);
 begin
   inherited Create;
-  FCols := 0;
-  FRows := 0;
-  FScrollbackLimit := AScrollbackLimit;
-  RecreateHistory;
+  FScrollbackLimit := Max(0, AScrollbackLimit);
   InitBlankCell;
-  SetSizeInternal(ACols, ARows, False);
-end;
-
-destructor TTermScreenBuffer.Destroy;
-begin
-  FreeAndNil(FHistory);
-  inherited Destroy;
-end;
-
-procedure TTermScreenBuffer.RecreateHistory;
-begin
-  FreeAndNil(FHistory);
-
-  if FScrollbackLimit > 0 then
-    FHistory := TTermHistoryRing.Create(FScrollbackLimit, True, True)
-  else
-    FHistory := nil;
+  FRows := Max(1, ARows);
+  SetSizeInternal(Max(1, ACols), FRows, False);
 end;
 
 procedure TTermScreenBuffer.InitBlankCell;
+var
+  Pen: TTermPen;
 begin
-  FBlankCell.FCodePoint := Ord(' ');
-  FBlankCell.Cluster := '';
-  SetLength(FBlankCell.Combining, 0);
-  FBlankCell.Attrs := [];
-  FBlankCell.FG := TermDefaultColorFG;
-  FBlankCell.BG := TermDefaultColorBG;
+  Pen.Attrs := [];
+  Pen.FG := TermDefaultColorFG;
+  Pen.BG := TermDefaultColorBG;
+  FBlankCell := TermBlankCell(Pen);
 end;
 
 procedure TTermScreenBuffer.SetBlankCell(const ACell: TTermCell);
 begin
-  FBlankCell := ACell; // class class TTermCell.Copy
+  FBlankCell := ACell;
 end;
 
-function TTermScreenBuffer.GetHistoryCount: Integer;
-begin
-  if Assigned(FHistory) then
-    Result := FHistory.Count
-  else
-    Result := 0;
-end;
-
-procedure TTermScreenBuffer.SetSizeInternal(ACols: Integer; ARows: Integer; Preserve: Boolean);
+procedure TTermScreenBuffer.SetSizeInternal(ACols: Integer; ARows: Integer;
+  Preserve: Boolean);
 var
-  OldLines: TTermLines;
-  NewLines: TTermLines;
-  CopyRows: Integer;
-  OldStart: Integer;
-  NewStart: Integer;
-  I: Integer;
+  I, J: Integer;
+  isBlank: Boolean;
 begin
-  if ACols < 1 then ACols := 1;
-  if ARows < 1 then ARows := 1;
-
-  if (not Preserve) or (Length(FLines) = 0) then
-  begin
-    FCols := ACols;
-    FRows := ARows;
-    SetLength(FLines, FRows);
-    for I := 0 to FRows - 1 do
-      FLines[I].Init(FCols, FBlankCell);
+  if (ACols = FCols) and (ARows = FRows) then
     Exit;
+
+  FCols := Max(1, ACols);
+  FRows := Max(1, ARows);
+  WriteLn('SetNewSize ', ACols, ':', Arows);
+  if Preserve then
+  begin
+    FLines := FLines.MakeCopy(ACols, FBlankCell);
+    if FLines.Length < ARows then
+    begin
+      J := FLines.Length;
+      SetLength(FLines, ARows);
+      for I := J to FLines.Length-1 do
+        FLines[I].Init(ACols, FBlankCell);
+    end;
+    if FLines.Length > ARows then
+    begin
+      isBlank := True;
+      for i := 0 to ACols-1 do begin
+        isBlank := isBlank or (FLines[High(FLines)].Cells[i].CodePoint = MaxInt);
+      end;
+      if isBlank then
+        SetLength(FLines, FLines.Length-1);
+      Write;
+    end;
+  end
+  else
+  begin
+    SetLength(FLines, ARows);
+    for I := 0 to ARows - 1 do
+    begin
+      SetLength(FLines[I].Cells, ACols);
+      FLines[I].Flags := [];
+      for J := 0 to ACols - 1 do
+        FLines[I].Cells[J] := FBlankCell;
+    end;
+  end;
+end;
+{procedure TTermScreenBuffer.SetSizeInternal(ACols, ARows: Integer; Preserve: Boolean);
+var
+  OldLines: array of TTermCellLine;
+  OldRows, R, C, CopyRows, CopyCols: Integer;
+begin
+  if Preserve then
+  begin
+    OldRows := Length(FLines);
+    SetLength(OldLines, OldRows);
+    for R := 0 to OldRows - 1 do
+    begin
+      SetLength(OldLines[R], Length(FLines[R]));
+      for C := 0 to High(FLines[R]) do
+        OldLines[R][C] := FLines[R][C];
+    end;
   end;
 
-  OldLines := FLines;
-  SetLength(NewLines, ARows);
+  FCols := Max(1, ACols);
+  FRows := Max(1, ARows);
+  SetLength(FLines, FRows);
+  for R := 0 to FRows - 1 do
+  begin
+    SetLength(FLines[R], FCols);
+    for C := 0 to FCols - 1 do
+      FLines[R][C] := FBlankCell;
+  end;
 
-  for I := 0 to ARows - 1 do
-    NewLines[I].Init(ACols, FBlankCell);
+  if Preserve and (Length(OldLines) > 0) then
+  begin
+    CopyRows := Min(Length(OldLines), FRows);
+    CopyCols := Min(Length(OldLines[0]), FCols);
+    for R := 0 to CopyRows - 1 do
+      for C := 0 to CopyCols - 1 do
+        FLines[R][C] := OldLines[R][C];
+  end;
+end;}
 
-  if Length(OldLines) < ARows then
-    CopyRows := Length(OldLines)
+procedure TTermScreenBuffer.AppendHistory(const ALine: TTermLine);
+var
+  Target: Integer;
+begin
+  if FScrollbackLimit <= 0 then
+    Exit;
+
+  if FHistory.Length <> FScrollbackLimit then
+    SetLength(FHistory, FScrollbackLimit);
+
+  if FHistoryCount < FScrollbackLimit then
+  begin
+    Target := (FHistoryStart + FHistoryCount) mod FScrollbackLimit;
+    Inc(FHistoryCount);
+  end
   else
-    CopyRows := ARows;
+  begin
+    Target := FHistoryStart;
+    FHistoryStart := (FHistoryStart + 1) mod FScrollbackLimit;
+  end;
 
-  OldStart := Length(OldLines) - CopyRows;
-  NewStart := 0;
-
-  for I := 0 to CopyRows - 1 do
-    NewLines[NewStart + I] := OldLines[OldStart + I].MakeResizedCopy(ACols, FBlankCell);
-
-  FLines := NewLines;
-  FCols := ACols;
-  FRows := ARows;
+  FHistory[Target].Flags := ALine.Flags;
+  FHistory[Target].Cells := Copy(ALine.Cells, 0, Length(ALine.Cells));
 end;
 
-
-procedure TTermScreenBuffer.Resize(ACols: Integer; ARows: Integer; Preserve: Boolean);
+procedure TTermScreenBuffer.Resize(ACols: Integer; ARows: Integer;
+  Preserve: Boolean);
 begin
   SetSizeInternal(ACols, ARows, Preserve);
 end;
 
 procedure TTermScreenBuffer.Clear;
 var
-  I: Integer;
+  R, C: Integer;
 begin
-  for I := 0 to High(FLines) do
-    FLines[I].Clear(FBlankCell);
-
+  for R := 0 to FRows - 1 do
+  begin
+    FLines[R].Flags:=[];
+    for C := 0 to FCols - 1 do
+      FLines[R].Cells[C] := FBlankCell;
+  end;
 end;
 
 procedure TTermScreenBuffer.ClearRow(ARow: Integer);
+var
+  C: Integer;
 begin
   if (ARow < 0) or (ARow >= FRows) then
     Exit;
-  FLines[ARow].Clear(FBlankCell);
-end;
-
-procedure TTermScreenBuffer.AppendHistory(const ALine: TTermLine);
-var
-  CopyLine: TTermLine;
-begin
-  if not Assigned(FHistory) then
-    RecreateHistory;
-
-  CopyLine := ALine.MakeResizedCopy(FCols, FBlankCell);
-  FHistory.Push(TTermHistoryLine.Create(CopyLine));
-  WriteLn('Added to history: ', CopyLine.AsPlainText);
-
+  FLines[ARow].Flags:=[];
+  for C := 0 to FCols - 1 do
+    FLines[ARow].Cells[C] := FBlankCell;
 end;
 
 procedure TTermScreenBuffer.ScrollUp(ATopRow, ABottomRow, ACount: Integer);
 var
-  I, R: Integer;
+  R, C, Count: Integer;
+  Saved: TTermLine;
 begin
-  if ACount <= 0 then Exit;
-  if ATopRow < 0 then ATopRow := 0;
-  if ABottomRow >= FRows then ABottomRow := FRows - 1;
-  if ATopRow > ABottomRow then Exit;
+  if (ATopRow < 0) or (ABottomRow >= FRows) or (ATopRow > ABottomRow) then
+    Exit;
 
-  while ACount > 0 do
+  Count := EnsureRange(ACount, 0, ABottomRow - ATopRow + 1);
+  if Count = 0 then
+    Exit;
+
+  if (ATopRow = 0) and (ABottomRow = FRows - 1) then
   begin
-    if ATopRow = 0 then
-      AppendHistory(FLines[ATopRow]);
+    SetLength(Saved.Cells, FCols);
+    Saved.Flags:=FLines[0].Flags;
+    for C := 0 to FCols - 1 do
+      Saved.Cells[C] := FLines[0].Cells[C];
+    AppendHistory(Saved);
+  end;
 
-    for R := ATopRow to ABottomRow - 1 do
-      FLines[R] := FLines[R + 1].MakeResizedCopy(FCols, FBlankCell);
+  for R := ATopRow to ABottomRow - Count do
+  begin
+    FLines[R].Flags := FLines[R + Count].Flags;
+    for C := 0 to FCols - 1 do
+      FLines[R].Cells[C] := FLines[R + Count].Cells[C];
+  end;
 
-    FLines[ABottomRow].Clear(FBlankCell);
-    Dec(ACount);
+  for R := ABottomRow - Count + 1 to ABottomRow do
+  begin
+    FLines[R].Flags:=[];
+    for C := 0 to FCols - 1 do
+      FLines[R].Cells[C] := FBlankCell;
   end;
 end;
 
 procedure TTermScreenBuffer.ScrollDown(ATopRow, ABottomRow, ACount: Integer);
 var
-  R: Integer;
+  R, C, Count: Integer;
 begin
-  if ACount <= 0 then Exit;
-  if ATopRow < 0 then ATopRow := 0;
-  if ABottomRow >= FRows then ABottomRow := FRows - 1;
-  if ATopRow > ABottomRow then Exit;
+  if (ATopRow < 0) or (ABottomRow >= FRows) or (ATopRow > ABottomRow) then
+    Exit;
 
-  while ACount > 0 do
+  Count := EnsureRange(ACount, 0, ABottomRow - ATopRow + 1);
+  if Count = 0 then
+    Exit;
+
+  for R := ABottomRow downto ATopRow + Count do
   begin
-    for R := ABottomRow downto ATopRow + 1 do
-      FLines[R] := FLines[R - 1].MakeResizedCopy(FCols, FBlankCell);
+    FLines[R].Flags := FLines[R - Count].Flags;
+    for C := 0 to FCols - 1 do
+      FLines[R].Cells[C] := FLines[R - Count].Cells[C];
+  end;
 
-    FLines[ATopRow].Clear(FBlankCell);
-    Dec(ACount);
+  for R := ATopRow to ATopRow + Count - 1 do
+  begin
+    FLines[R].Flags:=[];
+    for C := 0 to FCols - 1 do
+      FLines[R].Cells[C] := FBlankCell;
   end;
 end;
 
 function TTermScreenBuffer.InBounds(ACol, ARow: Integer): Boolean;
 begin
-  Result := (ARow >= 0) and (ARow < FRows) and
-            (ACol >= 0) and (ACol < FCols);
+  Result := (ARow >= 0) and (ARow < FRows) and (ACol >= 0) and (ACol < FCols);
 end;
 
 function TTermScreenBuffer.CellAt(ACol, ARow: Integer): PTermCell;
@@ -819,43 +827,50 @@ begin
 end;
 
 function TTermScreenBuffer.GetLine(ARow: Integer): TTermCellLine;
+var
+  I: Integer;
 begin
-  if (ARow >= 0) and (ARow < FRows) then
-    Result := FLines[ARow].Cells
-  else
-    Result := nil;
+  Result := Default(TTermCellLine);
+  if (ARow < 0) or (ARow >= FRows) then
+  begin
+    SetLength(Result, 0);
+    Exit;
+  end;
+  SetLength(Result, FCols);
+  for I := 0 to FCols - 1 do
+    Result[I] := FLines[ARow].Cells[I];
 end;
 
 function TTermScreenBuffer.GetHistoryLine(AIndex: Integer): TTermCellLine;
+var
+  Source, I: Integer;
 begin
-  if Assigned(FHistory) and (AIndex >= 0) and (AIndex < FHistory.Count) then
-    Result := FHistory[AIndex].Line.Cells
-  else
-    Result := nil;
+  Result := Default(TTermCellLine);
+  if (AIndex < 0) or (AIndex >= FHistoryCount) or (FScrollbackLimit <= 0) then
+  begin
+    SetLength(Result, 0);
+    Exit;
+  end;
+  Source := (FHistoryStart + AIndex) mod FScrollbackLimit;
+  SetLength(Result, Length(FHistory[Source].Cells));
+  for I := 0 to High(Result) do
+    Result[I] := FHistory[Source].Cells[I];
 end;
 
 constructor TTerminalCore.Create(ACols, ARows: Integer; AScrollbackLimit: Integer);
 begin
   inherited Create;
-
-  if ACols < 1 then ACols := 1;
-  if ARows < 1 then ARows := 1;
-
-  FCols := ACols;
-  FRows := ARows;
-
-  FMainBuffer := TTermScreenBuffer.Create(ACols, ARows, AScrollbackLimit);
-  FAltBuffer  := TTermScreenBuffer.Create(ACols, ARows, 0);
-  FUseAltBuffer := False;
-
-  SetLength(FTabStops, FCols);
+  FCols := Max(1, ACols);
+  FRows := Max(1, ARows);
+  FMainBuffer := TTermScreenBuffer.Create(FCols, FRows, AScrollbackLimit);
+  FAltBuffer := TTermScreenBuffer.Create(FCols, FRows, 0);
   Reset;
 end;
 
 destructor TTerminalCore.Destroy;
 begin
-  FAltBuffer.Free;
-  FMainBuffer.Free;
+  FreeAndNil(FAltBuffer);
+  FreeAndNil(FMainBuffer);
   inherited Destroy;
 end;
 
@@ -874,28 +889,36 @@ end;
 
 procedure TTerminalCore.ClampCursor;
 var
-  TopRow, BottomRow: Integer;
+  MinRow, MaxRow: Integer;
 begin
   if FOriginMode then
   begin
-    TopRow := FTopMargin;
-    BottomRow := FBottomMargin;
+    MinRow := FTopMargin;
+    MaxRow := FBottomMargin;
   end
   else
   begin
-    TopRow := 0;
-    BottomRow := FRows - 1;
+    MinRow := 0;
+    MaxRow := FRows - 1;
   end;
-
-  if FCursor.Col < 0 then FCursor.Col := 0;
-  if FCursor.Col >= FCols then FCursor.Col := FCols - 1;
-  if FCursor.Row < TopRow then FCursor.Row := TopRow;
-  if FCursor.Row > BottomRow then FCursor.Row := BottomRow;
+  FCursor.Col := EnsureRange(FCursor.Col, 0, FCols - 1);
+  FCursor.Row := EnsureRange(FCursor.Row, MinRow, MaxRow);
 end;
 
 procedure TTerminalCore.MarkAllDirty;
+var
+  B: TTermScreenBuffer;
+  R, C: Integer;
+  P: PTermCell;
 begin
-  InvalidateRect(0, 0, FCols - 1, FRows - 1);
+  B := ActiveBuffer;
+  for R := 0 to B.Rows - 1 do
+    for C := 0 to B.Cols - 1 do
+    begin
+      P := B.CellAt(C, R);
+      if P <> nil then
+        Include(P^.Attrs, tafDirty);
+    end;
 end;
 
 procedure TTerminalCore.InvalidateRect(ALeft, ATop, ARight, ABottom: Integer);
@@ -904,24 +927,25 @@ var
 begin
   if not Assigned(FOnInvalidate) then
     Exit;
-
-  if ALeft < 0 then ALeft := 0;
-  if ATop < 0 then ATop := 0;
-  if ARight >= FCols then ARight := FCols - 1;
-  if ABottom >= FRows then ABottom := FRows - 1;
-  if (ALeft > ARight) or (ATop > ABottom) then
-    Exit;
-
-  R.Left := ALeft;
-  R.Top := ATop;
-  R.Right := ARight;
-  R.Bottom := ABottom;
-  FOnInvalidate(Self, R);
+  R.Left := Max(0, ALeft);
+  R.Top := Max(0, ATop);
+  R.Right := Min(FCols - 1, ARight);
+  R.Bottom := Min(FRows - 1, ABottom);
+  if (R.Left <= R.Right) and (R.Top <= R.Bottom) then
+    FOnInvalidate(Self, R);
 end;
 
 procedure TTerminalCore.SetBracketedPasteMode(AValue: Boolean);
 begin
+  if FBracketedPasteMode = AValue then
+    Exit;
+
   FBracketedPasteMode := AValue;
+
+  if AValue then
+    WriteUTF8(#27'[?2004h')
+  else
+    WriteUTF8(#27'[?2004l');
 end;
 
 procedure TTerminalCore.SetTabStopDefaults;
@@ -930,9 +954,7 @@ var
 begin
   SetLength(FTabStops, FCols);
   for I := 0 to FCols - 1 do
-    FTabStops[I] := (I mod 8) = 0;
-  if FCols > 0 then
-    FTabStops[0] := True;
+    FTabStops[I] := (I > 0) and ((I mod TERM_DEFAULT_TAB_WIDTH) = 0);
 end;
 
 procedure TTerminalCore.InternalLineFeed(WithCarriageReturn: Boolean);
@@ -941,33 +963,37 @@ begin
     FCursor.Col := 0;
 
   if FCursor.Row = FBottomMargin then
-    ActiveBuffer.ScrollUp(FTopMargin, FBottomMargin, 1)
-  else if FCursor.Row < FRows - 1 then
+  begin
+    ActiveBuffer.ScrollUp(FTopMargin, FBottomMargin, 1);
+    InvalidateRect(0, FTopMargin, FCols - 1, FBottomMargin);
+  end
+  else
     Inc(FCursor.Row);
 
-  InvalidateRect(0, FTopMargin, FCols - 1, FBottomMargin);
+  ClampCursor;
 end;
 
 procedure TTerminalCore.PutCellAtCursor(const ACell: TTermCell; AdvanceCursor: Boolean);
 var
+  B: TTermScreenBuffer;
   Cell: PTermCell;
-  R: Integer;
+  C: Integer;
 begin
-  if not ActiveBuffer.InBounds(FCursor.Col, FCursor.Row) then
-    Exit;
-
+  B := ActiveBuffer;
   if FInsertMode then
   begin
-    for R := FCols - 1 downto FCursor.Col + 1 do
-      ActiveBuffer.CellAt(R, FCursor.Row)^ := ActiveBuffer.CellAt(R - 1, FCursor.Row)^;
-    ActiveBuffer.CellAt(FCursor.Col, FCursor.Row)^ := MakeBlankCell;
+    for C := FCols - 1 downto FCursor.Col + 1 do
+      if (B.CellAt(C, FCursor.Row) <> nil) and (B.CellAt(C - 1, FCursor.Row) <> nil) then
+        B.CellAt(C, FCursor.Row)^ := B.CellAt(C - 1, FCursor.Row)^;
   end;
 
-  Cell := ActiveBuffer.CellAt(FCursor.Col, FCursor.Row);
+  Cell := B.CellAt(FCursor.Col, FCursor.Row);
   if Cell <> nil then
+  begin
     Cell^ := ACell;
-
-  InvalidateRect(FCursor.Col, FCursor.Row, FCols - 1, FCursor.Row);
+    Include(Cell^.Attrs, tafDirty);
+    InvalidateRect(FCursor.Col, FCursor.Row, FCursor.Col, FCursor.Row);
+  end;
 
   if not AdvanceCursor then
     Exit;
@@ -976,31 +1002,23 @@ begin
   begin
     if FAutoWrap then
     begin
-      if FCursor.Row < FRows - 1 then
-      begin
-        if FCursor.Row = FBottomMargin then
-          ActiveBuffer.ScrollUp(FTopMargin, FBottomMargin, 1)
-        else
-          Inc(FCursor.Row);
-      end;
       FCursor.Col := 0;
-      if ActiveBuffer.InBounds(0, FCursor.Row) then
-        Include(ActiveBuffer.FLines[FCursor.Row].Flags, tlfWrapped);
+      if FCursor.Row = FBottomMargin then
+        InternalLineFeed(False)
+      else
+        Inc(FCursor.Row);
     end;
   end
   else
     Inc(FCursor.Col);
 
-  { WriteLn(Format('PutCell: CP=%d Cluster="%s" FG=%d', [
-    ACell.CodePoint,
-    ACell.Cluster,
-    PInteger(@ACell.FG.Index)^
-  ]));}
+  ClampCursor;
 end;
 
 procedure TTerminalCore.ClearCell(var ACell: TTermCell);
 begin
-  ACell := MakeBlankCell;
+  ACell.Cluster := '';
+  SetLength(ACell.Combining, 0);
 end;
 
 procedure TTerminalCore.CopyCell(const ASource: TTermCell; var ADest: TTermCell);
@@ -1008,120 +1026,111 @@ begin
   ADest := ASource;
 end;
 
-procedure TTerminalCore.InitializeCell(var ACell: TTermCell; ACodePoint: Cardinal;
-  const ACluster: RawByteString; const AAttrs: TTermAttrFlags;
-  const AFG, ABG: TTermColor);
+procedure TTerminalCore.InitializeCell(var ACell: TTermCell; ACodePoint: Cardinal; const ACluster: RawByteString;
+  const AAttrs: TTermAttrFlags; const AFG, ABG: TTermColor);
 begin
   ACell.CodePoint := ACodePoint;
   ACell.Cluster := ACluster;
-  ACell.Combining := nil;
+  SetLength(ACell.Combining, 0);
   ACell.Attrs := AAttrs;
   ACell.FG := AFG;
   ACell.BG := ABG;
 end;
 
 function TTerminalCore.PreviousBaseCell(out ACol, ARow: Integer; out ACell: PTermCell): Boolean;
+var
+  C, R: Integer;
 begin
   Result := False;
   ACell := nil;
-
-  ACol := FCursor.Col;
-  ARow := FCursor.Row;
-
-  if (ACol > 0) then
-    Dec(ACol)
-  else if (ARow > 0) then
+  R := FCursor.Row;
+  C := FCursor.Col - 1;
+  while R >= 0 do
   begin
-    Dec(ARow);
-    ACol := FCols - 1;
-  end
-  else
-    Exit;
-
-  ACell := ActiveBuffer.CellAt(ACol, ARow);
-  Result := ACell <> nil;
+    while C >= 0 do
+    begin
+      ACell := ActiveBuffer.CellAt(C, R);
+      if (ACell <> nil) and not (tafWideTrail in ACell^.Attrs) then
+      begin
+        ACol := C;
+        ARow := R;
+        Exit(True);
+      end;
+      Dec(C);
+    end;
+    Dec(R);
+    if R >= 0 then
+      C := FCols - 1;
+  end;
 end;
 
 procedure TTerminalCore.Reset;
 begin
-  FUseAltBuffer := False;
-
   FDefaultPen.Attrs := [];
   FDefaultPen.FG := TermDefaultColorFG;
   FDefaultPen.BG := TermDefaultColorBG;
   FPen := FDefaultPen;
-
+  FMainBuffer.BlankCell := TermBlankCell(FDefaultPen);
+  FAltBuffer.BlankCell := TermBlankCell(FDefaultPen);
+  FUseAltBuffer := False;
+  FMainBuffer.Clear;
+  FAltBuffer.Clear;
+  FTopMargin := 0;
+  FBottomMargin := FRows - 1;
+  FAutoWrap := True;
+  FOriginMode := False;
+  FInsertMode := False;
   FCursor.Col := 0;
   FCursor.Row := 0;
   FCursor.Visible := True;
   FSavedCursor := FCursor;
-
-  FTopMargin := 0;
-  FBottomMargin := FRows - 1;
-
-  FAutoWrap := True;
-  FOriginMode := False;
-  FInsertMode := False;
-  FBracketedPasteMode := False;
-
   SetTabStopDefaults;
-
-  FMainBuffer.BlankCell := TermBlankCell(FDefaultPen);
-  FAltBuffer.BlankCell := TermBlankCell(FDefaultPen);
-
-  FMainBuffer.Clear;
-  FAltBuffer.Clear;
-
   MarkAllDirty;
+  InvalidateRect(0, 0, FCols - 1, FRows - 1);
 end;
 
 procedure TTerminalCore.Resize(ACols, ARows: Integer);
 begin
-  if ACols < 1 then ACols := 1;
-  if ARows < 1 then ARows := 1;
-
-  FCols := ACols;
-  FRows := ARows;
-
-  FMainBuffer.Resize(ACols, ARows, True);
-  FAltBuffer.Resize(ACols, ARows, True);
-
-  SetTabStopDefaults;
+  FCols := Max(1, ACols);
+  FRows := Max(1, ARows);
+  FMainBuffer.Resize(FCols, FRows, True);
+  FAltBuffer.Resize(FCols, FRows, True);
   FTopMargin := 0;
   FBottomMargin := FRows - 1;
+  SetTabStopDefaults;
   ClampCursor;
   MarkAllDirty;
+  InvalidateRect(0, 0, FCols - 1, FRows - 1);
 end;
 
 procedure TTerminalCore.SwitchToMainBuffer;
 begin
-  if not FUseAltBuffer then
-    Exit;
   FUseAltBuffer := False;
   ClampCursor;
   MarkAllDirty;
+  InvalidateRect(0, 0, FCols - 1, FRows - 1);
 end;
 
 procedure TTerminalCore.SwitchToAltBuffer(AClear: Boolean);
 begin
   FUseAltBuffer := True;
   if AClear then
+  begin
+    FAltBuffer.BlankCell := TermBlankCell(FDefaultPen);
     FAltBuffer.Clear;
+  end;
   ClampCursor;
   MarkAllDirty;
+  InvalidateRect(0, 0, FCols - 1, FRows - 1);
 end;
 
 procedure TTerminalCore.SetCursorPos(ACol, ARow: Integer);
 begin
-  if ACol < 0 then ACol := 0;
-  if ARow < 0 then ARow := 0;
-
-  FCursor.Col := ACol;
   if FOriginMode then
     FCursor.Row := FTopMargin + ARow
   else
     FCursor.Row := ARow;
-
+  FCursor.Col := ACol;
   ClampCursor;
 end;
 
@@ -1145,70 +1154,45 @@ end;
 
 procedure TTerminalCore.CursorHome;
 begin
-  if FOriginMode then
-    SetCursorPos(0, 0)
-  else
-  begin
-    FCursor.Col := 0;
-    FCursor.Row := 0;
-    ClampCursor;
-  end;
+  SetCursorPos(0, 0);
 end;
 
 procedure TTerminalCore.CursorUp(ACount: Integer);
 begin
-  if ACount < 1 then ACount := 1;
-  Dec(FCursor.Row, ACount);
-  ClampCursor;
+  MoveCursor(0, -Max(1, ACount));
 end;
 
 procedure TTerminalCore.CursorDown(ACount: Integer);
 begin
-  if ACount < 1 then ACount := 1;
-  Inc(FCursor.Row, ACount);
-  ClampCursor;
+  MoveCursor(0, Max(1, ACount));
 end;
 
 procedure TTerminalCore.CursorForward(ACount: Integer);
 begin
-  if ACount < 1 then ACount := 1;
-  Inc(FCursor.Col, ACount);
-  ClampCursor;
+  MoveCursor(Max(1, ACount), 0);
 end;
 
 procedure TTerminalCore.CursorBackward(ACount: Integer);
 begin
-  if ACount < 1 then ACount := 1;
-  Dec(FCursor.Col, ACount);
-  ClampCursor;
+  MoveCursor(-Max(1, ACount), 0);
 end;
 
 procedure TTerminalCore.NextLine(ACount: Integer);
 begin
-  if ACount < 1 then ACount := 1;
+  CursorDown(ACount);
   FCursor.Col := 0;
-  Inc(FCursor.Row, ACount);
-  ClampCursor;
 end;
 
 procedure TTerminalCore.PrevLine(ACount: Integer);
 begin
-  if ACount < 1 then ACount := 1;
+  CursorUp(ACount);
   FCursor.Col := 0;
-  Dec(FCursor.Row, ACount);
-  ClampCursor;
 end;
 
 procedure TTerminalCore.SetScrollRegion(ATopRow, ABottomRow: Integer);
 begin
-  if ATopRow < 0 then ATopRow := 0;
-  if ABottomRow >= FRows then ABottomRow := FRows - 1;
-  if ATopRow >= ABottomRow then
-  begin
-    ResetScrollRegion;
+  if (ATopRow < 0) or (ABottomRow >= FRows) or (ATopRow >= ABottomRow) then
     Exit;
-  end;
-
   FTopMargin := ATopRow;
   FBottomMargin := ABottomRow;
   CursorHome;
@@ -1218,158 +1202,151 @@ procedure TTerminalCore.ResetScrollRegion;
 begin
   FTopMargin := 0;
   FBottomMargin := FRows - 1;
-  CursorHome;
 end;
 
 procedure TTerminalCore.ClearScreen;
 begin
+  ActiveBuffer.BlankCell := MakeBlankCell;
   ActiveBuffer.Clear;
-  CursorHome;
   MarkAllDirty;
+  InvalidateRect(0, 0, FCols - 1, FRows - 1);
 end;
 
 procedure TTerminalCore.ClearLine;
 begin
+  ActiveBuffer.BlankCell := MakeBlankCell;
   ActiveBuffer.ClearRow(FCursor.Row);
   InvalidateRect(0, FCursor.Row, FCols - 1, FCursor.Row);
 end;
 
 procedure TTerminalCore.EraseInDisplay(AMode: Integer);
 var
+  B: TTermScreenBuffer;
+  Blank: TTermCell;
   R, C: Integer;
   P: PTermCell;
 begin
+  B := ActiveBuffer;
+  Blank := MakeBlankCell;
+  B.BlankCell := Blank;
   case AMode of
     0:
       begin
-        EraseInLine(0);
+        for C := FCursor.Col to FCols - 1 do
+          if B.CellAt(C, FCursor.Row) <> nil then
+            B.CellAt(C, FCursor.Row)^ := Blank;
         for R := FCursor.Row + 1 to FRows - 1 do
-          ActiveBuffer.ClearRow(R);
-        InvalidateRect(FCursor.Col, FCursor.Row, FCols - 1, FRows - 1);
+          B.ClearRow(R);
       end;
     1:
       begin
         for R := 0 to FCursor.Row - 1 do
-          ActiveBuffer.ClearRow(R);
+          B.ClearRow(R);
         for C := 0 to FCursor.Col do
-        begin
-          P := ActiveBuffer.CellAt(C, FCursor.Row);
-          if P <> nil then ClearCell(P^);
-        end;
-        InvalidateRect(0, 0, FCursor.Col, FCursor.Row);
+          if B.CellAt(C, FCursor.Row) <> nil then
+            B.CellAt(C, FCursor.Row)^ := Blank;
       end;
-    2:
-      begin
-        ActiveBuffer.Clear;
-        MarkAllDirty;
-      end;
-    3:
-      begin
-        if not FUseAltBuffer then
-        begin
-          FMainBuffer.Clear;
-          MarkAllDirty;
-        end;
-      end;
+  else
+      B.Clear;
   end;
+  for R := 0 to FRows - 1 do
+    for C := 0 to FCols - 1 do
+    begin
+      P := B.CellAt(C, R);
+      if P <> nil then
+        Include(P^.Attrs, tafDirty);
+    end;
+  InvalidateRect(0, 0, FCols - 1, FRows - 1);
 end;
 
 procedure TTerminalCore.EraseInLine(AMode: Integer);
 var
+  B: TTermScreenBuffer;
+  Blank: TTermCell;
   C: Integer;
-  P: PTermCell;
 begin
+  B := ActiveBuffer;
+  Blank := MakeBlankCell;
   case AMode of
     0:
       for C := FCursor.Col to FCols - 1 do
-      begin
-        P := ActiveBuffer.CellAt(C, FCursor.Row);
-        if P <> nil then ClearCell(P^);
-      end;
+        if B.CellAt(C, FCursor.Row) <> nil then
+          B.CellAt(C, FCursor.Row)^ := Blank;
     1:
       for C := 0 to FCursor.Col do
+        if B.CellAt(C, FCursor.Row) <> nil then
+          B.CellAt(C, FCursor.Row)^ := Blank;
+  else
       begin
-        P := ActiveBuffer.CellAt(C, FCursor.Row);
-        if P <> nil then ClearCell(P^);
+        B.BlankCell := Blank;
+        B.ClearRow(FCursor.Row);
       end;
-    2:
-      ActiveBuffer.ClearRow(FCursor.Row);
   end;
   InvalidateRect(0, FCursor.Row, FCols - 1, FCursor.Row);
 end;
 
 procedure TTerminalCore.EraseChars(ACount: Integer);
 var
-  I: Integer;
-  P: PTermCell;
+  B: TTermScreenBuffer;
+  N, C: Integer;
+  Blank: TTermCell;
 begin
-  if ACount < 1 then ACount := 1;
-  for I := 0 to ACount - 1 do
-  begin
-    if FCursor.Col + I >= FCols then Break;
-    P := ActiveBuffer.CellAt(FCursor.Col + I, FCursor.Row);
-    if P <> nil then ClearCell(P^);
-  end;
-  InvalidateRect(FCursor.Col, FCursor.Row, FCols - 1, FCursor.Row);
+  B := ActiveBuffer;
+  N := EnsureRange(ACount, 1, FCols);
+  Blank := MakeBlankCell;
+  for C := FCursor.Col to Min(FCols - 1, FCursor.Col + N - 1) do
+    if B.CellAt(C, FCursor.Row) <> nil then
+      B.CellAt(C, FCursor.Row)^ := Blank;
+  InvalidateRect(FCursor.Col, FCursor.Row, Min(FCols - 1, FCursor.Col + N - 1), FCursor.Row);
 end;
 
 procedure TTerminalCore.InsertChars(ACount: Integer);
 var
-  C: Integer;
-  P: PTermCell;
+  B: TTermScreenBuffer;
+  Count, C: Integer;
+  Blank: TTermCell;
 begin
-  if ACount < 1 then ACount := 1;
-  if ACount > FCols - FCursor.Col then
-    ACount := FCols - FCursor.Col;
-
-  for C := FCols - 1 downto FCursor.Col + ACount do
-    ActiveBuffer.CellAt(C, FCursor.Row)^ := ActiveBuffer.CellAt(C - ACount, FCursor.Row)^;
-
-  for C := FCursor.Col to FCursor.Col + ACount - 1 do
-  begin
-    P := ActiveBuffer.CellAt(C, FCursor.Row);
-    if P <> nil then ClearCell(P^);
-  end;
-
+  B := ActiveBuffer;
+  Count := EnsureRange(ACount, 1, FCols);
+  Blank := MakeBlankCell;
+  for C := FCols - 1 downto FCursor.Col + Count do
+    if (B.CellAt(C, FCursor.Row) <> nil) and (B.CellAt(C - Count, FCursor.Row) <> nil) then
+      B.CellAt(C, FCursor.Row)^ := B.CellAt(C - Count, FCursor.Row)^;
+  for C := FCursor.Col to Min(FCols - 1, FCursor.Col + Count - 1) do
+    if B.CellAt(C, FCursor.Row) <> nil then
+      B.CellAt(C, FCursor.Row)^ := Blank;
   InvalidateRect(FCursor.Col, FCursor.Row, FCols - 1, FCursor.Row);
 end;
 
 procedure TTerminalCore.DeleteChars(ACount: Integer);
 var
-  C: Integer;
-  P: PTermCell;
+  B: TTermScreenBuffer;
+  Count, C: Integer;
+  Blank: TTermCell;
 begin
-  if ACount < 1 then ACount := 1;
-  if ACount > FCols - FCursor.Col then
-    ACount := FCols - FCursor.Col;
-
-  for C := FCursor.Col to FCols - ACount - 1 do
-    ActiveBuffer.CellAt(C, FCursor.Row)^ := ActiveBuffer.CellAt(C + ACount, FCursor.Row)^;
-
-  for C := FCols - ACount to FCols - 1 do
-  begin
-    P := ActiveBuffer.CellAt(C, FCursor.Row);
-    if P <> nil then ClearCell(P^);
-  end;
-
+  B := ActiveBuffer;
+  Count := EnsureRange(ACount, 1, FCols);
+  Blank := MakeBlankCell;
+  for C := FCursor.Col to FCols - Count - 1 do
+    if (B.CellAt(C, FCursor.Row) <> nil) and (B.CellAt(C + Count, FCursor.Row) <> nil) then
+      B.CellAt(C, FCursor.Row)^ := B.CellAt(C + Count, FCursor.Row)^;
+  for C := Max(FCursor.Col, FCols - Count) to FCols - 1 do
+    if B.CellAt(C, FCursor.Row) <> nil then
+      B.CellAt(C, FCursor.Row)^ := Blank;
   InvalidateRect(FCursor.Col, FCursor.Row, FCols - 1, FCursor.Row);
 end;
 
 procedure TTerminalCore.InsertLines(ACount: Integer);
 begin
-  if (FCursor.Row < FTopMargin) or (FCursor.Row > FBottomMargin) then
-    Exit;
-  if ACount < 1 then ACount := 1;
-  ActiveBuffer.ScrollDown(FCursor.Row, FBottomMargin, ACount);
+  ActiveBuffer.BlankCell := MakeBlankCell;
+  ActiveBuffer.ScrollDown(FCursor.Row, FBottomMargin, EnsureRange(ACount, 1, FRows));
   InvalidateRect(0, FCursor.Row, FCols - 1, FBottomMargin);
 end;
 
 procedure TTerminalCore.DeleteLines(ACount: Integer);
 begin
-  if (FCursor.Row < FTopMargin) or (FCursor.Row > FBottomMargin) then
-    Exit;
-  if ACount < 1 then ACount := 1;
-  ActiveBuffer.ScrollUp(FCursor.Row, FBottomMargin, ACount);
+  ActiveBuffer.BlankCell := MakeBlankCell;
+  ActiveBuffer.ScrollUp(FCursor.Row, FBottomMargin, EnsureRange(ACount, 1, FRows));
   InvalidateRect(0, FCursor.Row, FCols - 1, FBottomMargin);
 end;
 
@@ -1386,10 +1363,14 @@ end;
 procedure TTerminalCore.ReverseIndex;
 begin
   if FCursor.Row = FTopMargin then
-    ActiveBuffer.ScrollDown(FTopMargin, FBottomMargin, 1)
-  else if FCursor.Row > 0 then
+  begin
+    ActiveBuffer.BlankCell := MakeBlankCell;
+    ActiveBuffer.ScrollDown(FTopMargin, FBottomMargin, 1);
+    InvalidateRect(0, FTopMargin, FCols - 1, FBottomMargin);
+  end
+  else
     Dec(FCursor.Row);
-  InvalidateRect(0, FTopMargin, FCols - 1, FBottomMargin);
+  ClampCursor;
 end;
 
 procedure TTerminalCore.Backspace;
@@ -1413,10 +1394,10 @@ end;
 
 procedure TTerminalCore.BackTab(ACount: Integer);
 var
-  I, C: Integer;
+  C, N: Integer;
 begin
-  if ACount < 1 then ACount := 1;
-  for I := 1 to ACount do
+  N := Max(1, ACount);
+  while N > 0 do
   begin
     for C := FCursor.Col - 1 downto 0 do
       if FTabStops[C] then
@@ -1424,6 +1405,7 @@ begin
         FCursor.Col := C;
         Break;
       end;
+    Dec(N);
   end;
 end;
 
@@ -1468,86 +1450,83 @@ begin
     Exit;
   end;
 
-  if Width < 0 then
-    Exit;
-
-  if Width = 2 then
+  if (Width = 2) and (FCursor.Col >= FCols - 1) then
   begin
-    if FCols < 2 then
-      Exit;
-
-    if FCursor.Col >= FCols - 1 then
+    if FAutoWrap then
     begin
-      if FAutoWrap then
-      begin
-        FCursor.Col := 0;
-        if FCursor.Row = FBottomMargin then
-          InternalLineFeed(False)
-        else
-          Inc(FCursor.Row);
-        ClampCursor;
-      end
+      FCursor.Col := 0;
+      if FCursor.Row = FBottomMargin then
+        InternalLineFeed(False)
       else
-        Exit;
-    end;
+        Inc(FCursor.Row);
+      ClampCursor;
+    end
+    else
+      Exit;
   end;
 
   Cell := MakeBlankCell;
   Cell.CodePoint := ACodePoint;
   Cell.Cluster := EncodeUTF8CodePoint(ACodePoint);
   SetLength(Cell.Combining, 0);
-
-  Exclude(Cell.Attrs, tafWideLead);
-  Exclude(Cell.Attrs, tafWideTrail);
-  Exclude(Cell.Attrs, tafDirty);
-
   if Width = 2 then
     Include(Cell.Attrs, tafWideLead);
+  PutCellAtCursor(Cell, Width = 1);
 
-  if Width = 1 then
+  if Width = 2 then
   begin
-    PutCellAtCursor(Cell, True);
-    Exit;
-  end;
-
-  PutCellAtCursor(Cell, False);
-
-  Trail := ActiveBuffer.CellAt(FCursor.Col + 1, FCursor.Row);
-  if Trail <> nil then
-  begin
-    Trail^ := MakeBlankCell;
-    Trail^.CodePoint := 0;
-    Trail^.Cluster := '';
-    SetLength(Trail^.Combining, 0);
-    Exclude(Trail^.Attrs, tafWideLead);
-    Include(Trail^.Attrs, tafWideTrail);
-    Include(Trail^.Attrs, tafDirty);
-  end;
-
-  Include(ActiveBuffer.CellAt(FCursor.Col, FCursor.Row)^.Attrs, tafDirty);
-  InvalidateRect(FCursor.Col, FCursor.Row, FCursor.Col + 1, FCursor.Row);
-
-  if FCursor.Col <= FCols - 3 then
-    Inc(FCursor.Col, 2)
-  else if FAutoWrap then
-  begin
-    FCursor.Col := 0;
-    if FCursor.Row = FBottomMargin then
-      InternalLineFeed(False)
+    Trail := ActiveBuffer.CellAt(FCursor.Col + 1, FCursor.Row);
+    if Trail <> nil then
+    begin
+      Trail^ := MakeBlankCell;
+      Trail^.CodePoint := 0;
+      Trail^.Cluster := '';
+      SetLength(Trail^.Combining, 0);
+      Include(Trail^.Attrs, tafWideTrail);
+      Include(Trail^.Attrs, tafDirty);
+    end;
+    InvalidateRect(FCursor.Col, FCursor.Row, Min(FCursor.Col + 1, FCols - 1), FCursor.Row);
+    if FCursor.Col < FCols - 2 then
+      Inc(FCursor.Col, 2)
+    else if FAutoWrap then
+    begin
+      FCursor.Col := 0;
+      if FCursor.Row = FBottomMargin then
+        InternalLineFeed(False)
+      else
+        Inc(FCursor.Row);
+    end
     else
-      Inc(FCursor.Row);
+      FCursor.Col := FCols - 1;
     ClampCursor;
-  end
-  else
-    FCursor.Col := FCols - 1;
+  end;
 end;
 
 procedure TTerminalCore.WriteUTF8(const AUTF8: RawByteString);
 var
-  I: Integer;
+  Index: Integer;
+  CodePoint: Cardinal;
 begin
-  for I := 1 to Length(AUTF8) do
-    PutCodePoint(Byte(AUTF8[I]));
+  Index := 1;
+  while Index <= Length(AUTF8) do
+  begin
+    if not terminal.unicode.DecodeUTF8CodePoint(AUTF8, Index, CodePoint) then
+    begin
+      PutCodePoint($FFFD);
+      Inc(Index);
+      Continue;
+    end;
+
+    case CodePoint of
+      8: Backspace;
+      9: HorizontalTab;
+      10, 11, 12: LineFeed;
+      13: CarriageReturn;
+    else
+      if CodePoint >= 32 then
+        PutCodePoint(CodePoint);
+    end;
+  end;
 end;
 
 procedure TTerminalCore.SetAutoWrap(AValue: Boolean);
@@ -1569,7 +1548,6 @@ end;
 procedure TTerminalCore.SetCursorVisible(AValue: Boolean);
 begin
   FCursor.Visible := AValue;
-  InvalidateRect(FCursor.Col, FCursor.Row, FCursor.Col, FCursor.Row);
 end;
 
 procedure TTerminalCore.ResetPen;
@@ -1673,7 +1651,7 @@ begin
   if P <> nil then
     Result := P^
   else
-    Result := TermBlankCell(FDefaultPen);
+    Result := MakeBlankCell;
 end;
 
 function TTerminalCore.GetLine(ARow: Integer): TTermCellLine;
@@ -1683,24 +1661,17 @@ end;
 
 function TTerminalCore.GetHistoryLine(AIndex: Integer): TTermCellLine;
 begin
-  if FUseAltBuffer then
-    SetLength(Result, 0)
-  else
-    Result := FMainBuffer.GetHistoryLine(AIndex);
+  Result := FMainBuffer.GetHistoryLine(AIndex);
 end;
 
 function TTerminalCore.HistoryCount: Integer;
 begin
-  if FUseAltBuffer then
-    Result := 0
-  else
-    Result := FMainBuffer.HistoryCount;
+  Result := FMainBuffer.HistoryCount;
 end;
 
 function TTerminalCore.IsUsingAltBuffer: Boolean;
 begin
   Result := FUseAltBuffer;
 end;
-
 
 end.
