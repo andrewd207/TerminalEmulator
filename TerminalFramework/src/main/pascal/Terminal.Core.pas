@@ -245,6 +245,7 @@ type
     procedure Resize(ACols, ARows: Integer);
     procedure SwitchToMainBuffer;
     procedure SwitchToAltBuffer(AClear: Boolean = True);
+    procedure ClearAltBuffer;
 
     procedure SetCursorPos(ACol, ARow: Integer);
     procedure MoveCursor(ADeltaCol, ADeltaRow: Integer);
@@ -1138,6 +1139,13 @@ begin
     FAltBuffer.Clear;
   ClampCursor;
   MarkAllDirty;
+end;
+
+procedure TTerminalCore.ClearAltBuffer;
+begin
+  FAltBuffer.Clear;
+  if FUseAltBuffer then
+    MarkAllDirty;
 end;
 
 procedure TTerminalCore.SetCursorPos(ACol, ARow: Integer);

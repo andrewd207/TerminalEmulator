@@ -511,6 +511,21 @@ begin
         6: FCore.SetOriginMode(AEnable);
         7: FCore.SetAutoWrap(AEnable);
         25: FCore.SetCursorVisible(AEnable);
+        47:
+          if AEnable then
+            FCore.SwitchToAltBuffer(False)
+          else
+            FCore.SwitchToMainBuffer;
+        1047:
+          begin
+            if AEnable then
+              FCore.SwitchToAltBuffer(False)
+            else
+            begin
+              FCore.ClearAltBuffer;
+              FCore.SwitchToMainBuffer;
+            end;
+          end;
         1049:
           if AEnable then
             FCore.SwitchToAltBuffer(True)
