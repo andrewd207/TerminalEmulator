@@ -45,7 +45,7 @@ type
   end;
 
 function DecodeUTF8CodePoint(const S: RawByteString; var AByteIndex: Integer; out ACodePoint: Cardinal): Boolean;
-function EncodeUTF8CodePoint(ACodePoint: Cardinal): RawByteString;
+function EncodeUTF8CodePoint(ACodePoint: Cardinal): UTF8String;
 function IsValidUnicodeCodePoint(ACodePoint: Cardinal): Boolean;
 function IsCombiningCodePoint(ACodePoint: Cardinal): Boolean;
 function IsVariationSelector(ACodePoint: Cardinal): Boolean;
@@ -246,7 +246,7 @@ begin
   end;
 end;
 
-function EncodeUTF8CodePoint(ACodePoint: Cardinal): RawByteString;
+function EncodeUTF8CodePoint(ACodePoint: Cardinal): Utf8String;
 begin
   if not IsValidUnicodeCodePoint(ACodePoint) then
     ACodePoint := $FFFD;

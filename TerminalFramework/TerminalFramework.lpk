@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CONFIG>
+  <Package Version="5">
+    <Name Value="TerminalFramework"/>
+    <CompilerOptions>
+      <Version Value="11"/>
+      <SearchPaths>
+        <UnitOutputDirectory Value="target/units"/>
+        <IncludeFiles Value="target"/>
+        <OtherUnitFiles Value="src/main/pascal;target/units"/>
+      </SearchPaths>
+    </CompilerOptions>
+    <Version Major="1" Minor="0" Release="0"/>
+    <Files>
+      <Item>
+        <Filename Value="src/main/pascal/Terminal.Backend.Base.pas"/>
+        <UnitName Value="Terminal.Backend.Base"/>
+      </Item>
+      <Item>
+        <Filename Value="src/main/pascal/Terminal.Backend.Unix.pas"/>
+        <UnitName Value="Terminal.Backend.Unix"/>
+      </Item>
+      <Item>
+        <Filename Value="src/main/pascal/Terminal.Backend.Windows.pas"/>
+        <UnitName Value="Terminal.Backend.Windows"/>
+      </Item>
+      <Item>
+        <Filename Value="src/main/pascal/Terminal.Controller.pas"/>
+        <UnitName Value="Terminal.Controller"/>
+      </Item>
+      <Item>
+        <Filename Value="src/main/pascal/Terminal.Core.pas"/>
+        <UnitName Value="Terminal.Core"/>
+      </Item>
+      <Item>
+        <Filename Value="src/main/pascal/Terminal.Parser.pas"/>
+        <UnitName Value="Terminal.Parser"/>
+      </Item>
+      <Item>
+        <Filename Value="src/main/pascal/Terminal.Unicode.pas"/>
+        <UnitName Value="Terminal.Unicode"/>
+      </Item>
+    </Files>
+    <RequiredPkgs>
+      <Item>
+        <PackageName Value="FCL"/>
+      </Item>
+    </RequiredPkgs>
+    <UsageOptions>
+      <UnitPath Value="$(PkgOutDir)"/>
+    </UsageOptions>
+    <PublishOptions>
+      <Version Value="2"/>
+      <UseFileFilters Value="True"/>
+    </PublishOptions>
+  </Package>
+</CONFIG>

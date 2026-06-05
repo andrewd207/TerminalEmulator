@@ -30,7 +30,7 @@ type
     procedure SendTextUTF8(const AUTF8: RawByteString);
     procedure SendKeyEnter;
     procedure SendKeyBackspace;
-    procedure SendKeyTab;
+    procedure SendKeyTab(AShiftPressed: Boolean);
     procedure SendKeyEscape;
     procedure SendArrowUp(Ctrl: Boolean);
     procedure SendArrowDown(Ctrl: Boolean);
@@ -70,6 +70,7 @@ end;
 function TTerminalController.StartShell(const AShell: string; const AArgs: array of string): Boolean;
 begin
   Result := FBackend.StartShell(AShell, AArgs);
+
 end;
 
 function TTerminalController.StartCommand(const AProgram: string; const AArgs: array of string): Boolean;
@@ -113,9 +114,12 @@ begin
   SendInput(#127);
 end;
 
-procedure TTerminalController.SendKeyTab;
+procedure TTerminalController.SendKeyTab(AShiftPressed: Boolean);
 begin
-  SendInput(#9);
+  if AShiftPressed then
+    SendInput(#27'[Z')   // common Shift+Tab / BackTab sequence
+  else
+    SendInput(#9);
 end;
 
 procedure TTerminalController.SendKeyEscape;

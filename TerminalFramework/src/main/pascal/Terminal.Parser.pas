@@ -52,6 +52,7 @@ type
     FDCSBuffer: RawByteString;
     FEscapePendingInString: Boolean;
     FUTF8Pending: RawByteString;
+    FNeededUTF8Bytes: Integer;
     FOnDCS: TTermDCSHandler;
     FOnUnknownCSI: TTermUnknownCSIEvent;
     FOnUnknownESC: TTermUnknownESCEvent;
@@ -245,7 +246,10 @@ begin
   while Index <= Length(FUTF8Pending) do
   begin
     if terminal.unicode.DecodeUTF8CodePoint(FUTF8Pending, Index, CodePoint) then
-      FCore.PutCodePoint(CodePoint)
+    begin
+      FCore.PutCodePoint(CodePoint);
+      if CodePoint>255 then writeln(codepoint);
+    end
     else
     begin
       if ForceReplacement then
@@ -258,7 +262,10 @@ begin
     end;
   end;
   if Index > Length(FUTF8Pending) then
-    FUTF8Pending := ''
+  begin
+    FUTF8Pending := '';
+    FNeededUTF8Bytes := 0;
+  end
   else if Index > 1 then
     Delete(FUTF8Pending, 1, Index - 1);
 end;
@@ -316,6 +323,22 @@ end;
 
 procedure TTerminalParser.HandlePrintable(B: Byte);
 begin
+  if (B and $80) = $00 then
+    FNeededUTF8Bytes := 0
+  else if (B and $C0) = $80 then
+  begin
+    if FNeededUTF8Bytes > 0 then
+      Dec(FNeededUTF8Bytes);
+  end
+  else if (B and $E0) = $C0 then
+    FNeededUTF8Bytes := 1
+  else if (B and $F0) = $E0 then
+    FNeededUTF8Bytes := 2
+  else if (B and $F8) = $F0 then
+    FNeededUTF8Bytes := 3
+  else
+    FNeededUTF8Bytes := 0;
+
   FUTF8Pending := FUTF8Pending + ByteToChar(B);
   FlushPendingUTF8(False);
 end;
@@ -563,16 +586,8 @@ begin
     'L': FCore.InsertLines(ParamValue(0, 1));
     'M': FCore.DeleteLines(ParamValue(0, 1));
     'P': FCore.DeleteChars(ParamValue(0, 1));
-    'S':
-      begin
-        FCore.SetCursorPos(FCore.Cursor.Col, FCore.Rows - 1);
-        FCore.DeleteLines(ParamValue(0, 1));
-      end;
-    'T':
-      begin
-        FCore.SetCursorPos(FCore.Cursor.Col, 0);
-        FCore.InsertLines(ParamValue(0, 1));
-      end;
+    'S': FCore.ScrollUp(ParamValue(0, 1));
+    'T': FCore.ScrollDown(ParamValue(0, 1));
     'X': FCore.EraseChars(ParamValue(0, 1));
     'Z': FCore.BackTab(ParamValue(0, 1));
     '@': FCore.InsertChars(ParamValue(0, 1));
@@ -614,6 +629,12 @@ end;
 
 procedure TTerminalParser.FeedByte(B: Byte);
 begin
+  if (FNeededUTF8Bytes > 0) and ((B and $C0) = $80) then
+  begin
+    HandlePrintable(B);
+    Exit;
+  end;
+
   if IsC1(B) then
   begin
     ExecuteC1(B);

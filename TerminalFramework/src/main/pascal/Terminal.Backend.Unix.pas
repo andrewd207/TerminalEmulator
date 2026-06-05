@@ -314,7 +314,7 @@ begin
   WS.ws_row := ARows;
   WS.ws_xpixel := 0;
   WS.ws_ypixel := 0;
-  Writeln(Format('%d:%d', [ACols, ARows]));
+  //Writeln(Format('%d:%d', [ACols, ARows]));
   Result := fpIOCtl(FMasterFD, TIOCSWINSZ, @WS) = 0;
 end;
 

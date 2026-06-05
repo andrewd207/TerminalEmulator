@@ -130,6 +130,7 @@ type
     Col: Integer;
     Row: Integer;
     Visible: Boolean;
+    PendingWrap: Boolean; // set when cursor is at last col; next printable char wraps first
   end;
 
   TTermCellPos = record
@@ -258,6 +259,8 @@ type
     procedure PrevLine(ACount: Integer = 1);
     procedure SetScrollRegion(ATopRow, ABottomRow: Integer);
     procedure ResetScrollRegion;
+    procedure ScrollUp(ACount: Integer = 1);
+    procedure ScrollDown(ACount: Integer = 1);
 
     procedure ClearScreen;
     procedure ClearLine;
@@ -692,6 +695,7 @@ var
   OldStart: Integer;
   NewStart: Integer;
   I: Integer;
+  AllBlank: Boolean;
 begin
   if ACols < 1 then ACols := 1;
   if ARows < 1 then ARows := 1;
@@ -704,6 +708,37 @@ begin
     for I := 0 to FRows - 1 do
       FLines[I].Init(FCols, FBlankCell);
     Exit;
+  end;
+
+  { Fast path: only the row count changes and columns are the same. }
+  if ACols = FCols then
+  begin
+    if ARows > FRows then
+    begin
+      SetLength(FLines, ARows);
+      for I := FRows to ARows - 1 do
+        FLines[I].Init(FCols, FBlankCell);
+      FRows := ARows;
+      Exit;
+    end
+    else if ARows < FRows then
+    begin
+      AllBlank := True;
+      for I := ARows to FRows - 1 do
+        if FLines[I].Cells.UsedLength > 0 then
+        begin
+          AllBlank := False;
+          Break;
+        end;
+      if AllBlank then
+      begin
+        SetLength(FLines, ARows);
+        FRows := ARows;
+        Exit;
+      end;
+    end
+    else
+      Exit; { same size — nothing to do }
   end;
 
   OldLines := FLines;
@@ -940,6 +975,8 @@ begin
   if WithCarriageReturn then
     FCursor.Col := 0;
 
+  FCursor.PendingWrap := False;
+
   if FCursor.Row = FBottomMargin then
     ActiveBuffer.ScrollUp(FTopMargin, FBottomMargin, 1)
   else if FCursor.Row < FRows - 1 then
@@ -975,15 +1012,8 @@ begin
   if FCursor.Col = FCols - 1 then
   begin
     if FAutoWrap then
-    begin
-      if FCursor.Row = FBottomMargin then
-        ActiveBuffer.ScrollUp(FTopMargin, FBottomMargin, 1)
-      else if FCursor.Row < FRows - 1 then
-        Inc(FCursor.Row);
-      FCursor.Col := 0;
-      if ActiveBuffer.InBounds(0, FCursor.Row) then
-        Include(ActiveBuffer.FLines[FCursor.Row].Flags, tlfWrapped);
-    end;
+      FCursor.PendingWrap := True;
+    { don't advance — wrap fires on the next printable character }
   end
   else
     Inc(FCursor.Col);
@@ -1051,6 +1081,7 @@ begin
   FCursor.Col := 0;
   FCursor.Row := 0;
   FCursor.Visible := True;
+  FCursor.PendingWrap := False;
   FSavedCursor := FCursor;
 
   FTopMargin := 0;
@@ -1086,6 +1117,7 @@ begin
   SetTabStopDefaults;
   FTopMargin := 0;
   FBottomMargin := FRows - 1;
+  FCursor.PendingWrap := False;
   ClampCursor;
   MarkAllDirty;
 end;
@@ -1119,6 +1151,7 @@ begin
   else
     FCursor.Row := ARow;
 
+  FCursor.PendingWrap := False;
   ClampCursor;
 end;
 
@@ -1126,6 +1159,7 @@ procedure TTerminalCore.MoveCursor(ADeltaCol, ADeltaRow: Integer);
 begin
   Inc(FCursor.Col, ADeltaCol);
   Inc(FCursor.Row, ADeltaRow);
+  FCursor.PendingWrap := False;
   ClampCursor;
 end;
 
@@ -1137,6 +1171,7 @@ end;
 procedure TTerminalCore.RestoreCursor;
 begin
   FCursor := FSavedCursor;
+  FCursor.PendingWrap := False;
   ClampCursor;
 end;
 
@@ -1148,6 +1183,7 @@ begin
   begin
     FCursor.Col := 0;
     FCursor.Row := 0;
+    FCursor.PendingWrap := False;
     ClampCursor;
   end;
 end;
@@ -1156,6 +1192,7 @@ procedure TTerminalCore.CursorUp(ACount: Integer);
 begin
   if ACount < 1 then ACount := 1;
   Dec(FCursor.Row, ACount);
+  FCursor.PendingWrap := False;
   ClampCursor;
 end;
 
@@ -1163,6 +1200,7 @@ procedure TTerminalCore.CursorDown(ACount: Integer);
 begin
   if ACount < 1 then ACount := 1;
   Inc(FCursor.Row, ACount);
+  FCursor.PendingWrap := False;
   ClampCursor;
 end;
 
@@ -1170,6 +1208,7 @@ procedure TTerminalCore.CursorForward(ACount: Integer);
 begin
   if ACount < 1 then ACount := 1;
   Inc(FCursor.Col, ACount);
+  FCursor.PendingWrap := False;
   ClampCursor;
 end;
 
@@ -1177,6 +1216,7 @@ procedure TTerminalCore.CursorBackward(ACount: Integer);
 begin
   if ACount < 1 then ACount := 1;
   Dec(FCursor.Col, ACount);
+  FCursor.PendingWrap := False;
   ClampCursor;
 end;
 
@@ -1185,6 +1225,7 @@ begin
   if ACount < 1 then ACount := 1;
   FCursor.Col := 0;
   Inc(FCursor.Row, ACount);
+  FCursor.PendingWrap := False;
   ClampCursor;
 end;
 
@@ -1193,6 +1234,7 @@ begin
   if ACount < 1 then ACount := 1;
   FCursor.Col := 0;
   Dec(FCursor.Row, ACount);
+  FCursor.PendingWrap := False;
   ClampCursor;
 end;
 
@@ -1216,6 +1258,20 @@ begin
   FTopMargin := 0;
   FBottomMargin := FRows - 1;
   CursorHome;
+end;
+
+procedure TTerminalCore.ScrollUp(ACount: Integer);
+begin
+  if ACount < 1 then ACount := 1;
+  ActiveBuffer.ScrollUp(FTopMargin, FBottomMargin, ACount);
+  InvalidateRect(0, FTopMargin, FCols - 1, FBottomMargin);
+end;
+
+procedure TTerminalCore.ScrollDown(ACount: Integer);
+begin
+  if ACount < 1 then ACount := 1;
+  ActiveBuffer.ScrollDown(FTopMargin, FBottomMargin, ACount);
+  InvalidateRect(0, FTopMargin, FCols - 1, FBottomMargin);
 end;
 
 procedure TTerminalCore.ClearScreen;
@@ -1373,6 +1429,7 @@ end;
 procedure TTerminalCore.CarriageReturn;
 begin
   FCursor.Col := 0;
+  FCursor.PendingWrap := False;
 end;
 
 procedure TTerminalCore.LineFeed;
@@ -1382,6 +1439,7 @@ end;
 
 procedure TTerminalCore.ReverseIndex;
 begin
+  FCursor.PendingWrap := False;
   if FCursor.Row = FTopMargin then
     ActiveBuffer.ScrollDown(FTopMargin, FBottomMargin, 1)
   else if FCursor.Row > 0 then
@@ -1391,6 +1449,7 @@ end;
 
 procedure TTerminalCore.Backspace;
 begin
+  FCursor.PendingWrap := False;
   if FCursor.Col > 0 then
     Dec(FCursor.Col);
 end;
@@ -1399,6 +1458,7 @@ procedure TTerminalCore.HorizontalTab;
 var
   C: Integer;
 begin
+  FCursor.PendingWrap := False;
   for C := FCursor.Col + 1 to FCols - 1 do
     if FTabStops[C] then
     begin
@@ -1412,6 +1472,7 @@ procedure TTerminalCore.BackTab(ACount: Integer);
 var
   I, C: Integer;
 begin
+  FCursor.PendingWrap := False;
   if ACount < 1 then ACount := 1;
   for I := 1 to ACount do
   begin
@@ -1453,6 +1514,7 @@ begin
 
   if Width = 0 then
   begin
+    { combining/zero-width: attach to the previous base cell, no wrap resolution }
     if PreviousBaseCell(BaseCol, BaseRow, BaseCell) then
     begin
       BaseCell^.Cluster := BaseCell^.Cluster + EncodeUTF8CodePoint(ACodePoint);
@@ -1468,21 +1530,40 @@ begin
   if Width < 0 then
     Exit;
 
+  { Resolve deferred wrap: the previous char filled the last column and set
+    PendingWrap.  The actual scroll/row-advance happens here, before we place
+    this character, so CR/LF after a full line don't double-advance. }
+  if FCursor.PendingWrap then
+  begin
+    FCursor.PendingWrap := False;
+    if ActiveBuffer.InBounds(0, FCursor.Row) then
+      Include(ActiveBuffer.FLines[FCursor.Row].Flags, tlfWrapped);
+    if FCursor.Row = FBottomMargin then
+      ActiveBuffer.ScrollUp(FTopMargin, FBottomMargin, 1)
+    else if FCursor.Row < FRows - 1 then
+      Inc(FCursor.Row);
+    FCursor.Col := 0;
+    InvalidateRect(0, FTopMargin, FCols - 1, FBottomMargin);
+  end;
+
   if Width = 2 then
   begin
     if FCols < 2 then
       Exit;
 
+    { wide char doesn't fit starting at the last column — wrap now }
     if FCursor.Col >= FCols - 1 then
     begin
       if FAutoWrap then
       begin
-        FCursor.Col := 0;
+        if ActiveBuffer.InBounds(0, FCursor.Row) then
+          Include(ActiveBuffer.FLines[FCursor.Row].Flags, tlfWrapped);
         if FCursor.Row = FBottomMargin then
-          InternalLineFeed(False)
-        else
+          ActiveBuffer.ScrollUp(FTopMargin, FBottomMargin, 1)
+        else if FCursor.Row < FRows - 1 then
           Inc(FCursor.Row);
-        ClampCursor;
+        FCursor.Col := 0;
+        InvalidateRect(0, FTopMargin, FCols - 1, FBottomMargin);
       end
       else
         Exit;
@@ -1492,6 +1573,8 @@ begin
   Cell := MakeBlankCell;
   Cell.CodePoint := ACodePoint;
   Cell.Cluster := EncodeUTF8CodePoint(ACodePoint);
+  if Length(Cell.Cluster) > 1 then
+    WriteLn(Format('U+%04X %s', [ACodePoint, EncodeUTF8CodePoint(ACodePoint)]));
   SetLength(Cell.Combining, 0);
 
   Exclude(Cell.Attrs, tafWideLead);
@@ -1526,17 +1609,13 @@ begin
 
   if FCursor.Col <= FCols - 3 then
     Inc(FCursor.Col, 2)
-  else if FAutoWrap then
-  begin
-    FCursor.Col := 0;
-    if FCursor.Row = FBottomMargin then
-      InternalLineFeed(False)
-    else
-      Inc(FCursor.Row);
-    ClampCursor;
-  end
   else
+  begin
+    { wide char occupied the last two columns; next char must wrap first }
     FCursor.Col := FCols - 1;
+    if FAutoWrap then
+      FCursor.PendingWrap := True;
+  end;
 end;
 
 procedure TTerminalCore.WriteUTF8(const AUTF8: RawByteString);
