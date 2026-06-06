@@ -12,7 +12,9 @@
   <modules>
     <module>TerminalFramework</module>
     <module>ViewfpGUI</module>
+    <module>ViewLCL</module>
     <module>ExampleTerminal</module>
+    <module>ExampleTerminalLCL</module>
     <module>tools/replay</module>
   </modules>
 

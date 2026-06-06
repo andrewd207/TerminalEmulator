@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <name>ViewLCL</name>
+  <!-- version inherited from aggregator -->
+  <author>Andrew Haines</author>
+  <license>BSD-3-Clause</license>
+
+  <moduleDependencies>
+    <module>../TerminalFramework</module>
+  </moduleDependencies>
+
+  <build>
+    <packaging>library</packaging>
+    <outputDirectory>target</outputDirectory>
+    <compilerOptions>
+      <!-- LCL is not in the pasbuild repo; point at the local Lazarus tree. -->
+      <option>-Fu/home/andrew/Programming/Tools/lazarus-gitlab/lcl/units/x86_64-linux/</option>
+      <option>-Fu/home/andrew/Programming/Tools/lazarus-gitlab/lcl/units/x86_64-linux/gtk2/</option>
+      <option>-Fu/home/andrew/Programming/Tools/lazarus-gitlab/components/lazutils/lib/x86_64-linux/</option>
+      <option>-dLCL</option>
+      <option>-dLCLgtk2</option>
+    </compilerOptions>
+  </build>
+
+</project>

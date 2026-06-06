@@ -5,9 +5,9 @@
 :experimental:
 
 A VT/xterm-compatible terminal emulator framework written in Free Pascal, with
-an fpGUI front-end. Designed as a reusable library: the backend, VT parser,
-and view widget are independent units that can be composed into other
-applications.
+both an fpGUI and an LCL (Lazarus) front-end. Designed as a reusable library:
+the backend, VT parser, and view widgets are independent units that can be
+composed into other applications.
 
 image:https://img.shields.io/badge/license-BSD--3--Clause-blue[License]
 image:https://img.shields.io/badge/FPC-3.3.1%2B-success[FPC]
@@ -24,8 +24,17 @@ toc::[]
   `Shift` bypass for native selection.
 * Backends: Unix (forkpty) and Windows (ConPTY); the same Controller drives
   either.
-* fpGUI widget: scrollback, font + emoji-font fallback, configurable cursor
-  style, palette, and selection colors.
+* fpGUI **and** LCL widgets: scrollback, font + emoji-font fallback,
+  configurable cursor style, palette, and selection colors. Right-click
+  context menu with Copy / Paste / Font / Emoji Font. The Copy/Paste items
+  collaborate with bracketed-paste-aware apps: when the running app has
+  enabled `?2004`, Copy forwards `Ctrl+Shift+C` (CSI u) and Paste forwards
+  `Ctrl+Shift+V` so the app can run its own clipboard handlers (and answer
+  back via OSC 52). Paste enables/disables based on actual clipboard
+  contents (text — plus image formats on the LCL view).
+* `YieldRightClickToApp` property (both views): default `False` keeps the
+  context menu working even in fullscreen TUIs; set `True` to forward
+  right-clicks into a mouse-capturing app.
 * No platform-specific paths or hardcoded debug files. Optional tracing
   gated on env vars (see <<debug,Debug>>).
 
@@ -35,10 +44,13 @@ toc::[]
 ----
 TerminalFramework/   Core library (parser, screen model, PTY backends)
 ViewfpGUI/           fpGUI widget that renders a TTerminalController
-ExampleTerminal/     Minimal demo app
+ViewLCL/             LCL (Lazarus) widget that renders a TTerminalController
+ExampleTerminal/     Minimal fpGUI demo app
+ExampleTerminalLCL/  Minimal LCL demo app (lazbuild script + pasbuild module)
 tools/replay/        Trace-replay tool for parser debugging
 tools/build-win64.sh Cross-compile script for Windows x86_64
 tools/sgr-demo.sh    Bash script exercising SGR features
+Makefile             Build everything; reports per-module pass/fail summary
 ----
 
 == Prerequisites
@@ -48,7 +60,11 @@ tools/sgr-demo.sh    Bash script exercising SGR features
 * https://github.com/graemeg/pasbuild[pasbuild] — the Maven-style build
   tool used for module orchestration.
 * http://fpgui.sourceforge.net[fpGUI Toolkit] 2.1 or newer, installed
-  through pasbuild (the build will look for it in `~/.pasbuild/repository`).
+  through pasbuild (the build will look for it in `~/.pasbuild/repository`)
+  — only required for the fpGUI view + example.
+* https://www.lazarus-ide.org[Lazarus / LCL] checkout — only required for
+  the LCL view + example. `Makefile` and `ViewLCL/project.xml` currently
+  point at `~/Programming/Tools/lazarus-gitlab/`; adjust to match your tree.
 * For Win64 cross-compile: FPC's `-Twin64` target (bundled with default FPC
   on Linux; no extra mingw needed for our use).
 
@@ -71,19 +87,33 @@ pasbuild install -p debug
 
 === Linux (or any Unix)
 
-[source,shell]
-----
-pasbuild compile -f project.xml -p debug
-./ExampleTerminal/target/exampleterminal
-----
-
-To build a single module:
+The top-level `Makefile` attempts every module and prints a pass/fail
+summary at the end (continues past failures so you can see everything in
+one run):
 
 [source,shell]
 ----
-pasbuild compile -f project.xml -m TerminalFramework -p debug
-pasbuild compile -f project.xml -m ViewfpGUI       -p debug
-pasbuild compile -f project.xml -m ExampleTerminal -p debug
+make
+./ExampleTerminal/target/exampleterminal       # fpGUI demo
+./ExampleTerminalLCL/target/exampleterminallcl # LCL demo
+----
+
+Per-module via pasbuild directly:
+
+[source,shell]
+----
+pasbuild compile -f project.xml -m TerminalFramework    -p debug
+pasbuild compile -f project.xml -m ViewfpGUI            -p debug
+pasbuild compile -f project.xml -m ViewLCL              -p debug
+pasbuild compile -f project.xml -m ExampleTerminal      -p debug
+pasbuild compile -f project.xml -m ExampleTerminalLCL   -p debug
+----
+
+The LCL example can also be built through Lazarus tooling:
+
+[source,shell]
+----
+./ExampleTerminalLCL/build.sh   # wraps lazbuild + registers the .lpk deps
 ----
 
 === Windows x86_64 (cross-compile from Linux)
@@ -110,7 +140,7 @@ Windows backend uses ConPTY, so the resulting binary requires
 
 == Usage
 
-Embed the controller and view:
+Embed the controller and view. fpGUI:
 
 [source,pascal]
 ----
@@ -120,6 +150,27 @@ FController := TTerminalController.Create(80, 25, 5000); { cols, rows, scrollbac
 TerminalView.AttachController(FController);
 TerminalView.StartShell;            { defaults to user's shell }
 TerminalView.StartShell('/bin/zsh'); { or an explicit path }
+----
+
+LCL — identical, just use the LCL widget. `Interfaces` must be the first
+unit in your program to select a widgetset:
+
+[source,pascal]
+----
+program MyTerm;
+uses
+  Interfaces, Forms,
+  Terminal.Controller, Terminal.View.LCL;
+
+var
+  Frm: TTerminalLCLForm;
+begin
+  Application.Initialize;
+  Application.CreateForm(TTerminalLCLForm, Frm);
+  Frm.TerminalView.AttachController(TTerminalController.Create(80, 25, 5000));
+  Frm.TerminalView.StartShell;
+  Application.Run;
+end.
 ----
 
 On Windows the default-shell search order is Git Bash -> MSYS2 bash ->

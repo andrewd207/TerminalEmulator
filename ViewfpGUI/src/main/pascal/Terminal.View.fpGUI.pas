@@ -44,6 +44,7 @@ type
     FSelectionBGColor: TfpgColor;
     FOnFontChanged: TNotifyEvent;
     FOnShellExit: TNotifyEvent;
+    FYieldRightClickToApp: Boolean;
     FLastMouseReportCol: Integer;
     FLastMouseReportRow: Integer;
     FShellExited: Boolean;
@@ -111,6 +112,10 @@ type
     property FontDesc: string read FFontDesc write FFontDesc;
     property EmojiFontDesc: string read FEmojiFontDesc write FEmojiFontDesc;
     property CursorStyle: TCursorStyle read FCursorStyle write FCursorStyle;
+    { When True, right-click is forwarded to a mouse-capturing app (?1000/?1003)
+      instead of opening the context menu. When False (default) the context
+      menu always opens on right-click, even in fullscreen TUIs. }
+    property YieldRightClickToApp: Boolean read FYieldRightClickToApp write FYieldRightClickToApp default False;
     property OnFontChanged: TNotifyEvent read FOnFontChanged write FOnFontChanged;
     { Fired once, in the pump-timer context, when the child process exits.
       If unset, the view writes a default banner into the buffer; assigning a
@@ -725,6 +730,7 @@ end;
 procedure TTerminalFPGUIView.ContextPopupShow(Sender: TObject);
 begin
   FContextMenu.MenuItemByName('Copy').Enabled:=FSelection.Active;
+  FContextMenu.MenuItemByName('Paste').Enabled:=fpgClipboard.Text <> '';
 end;
 
 function TTerminalFPGUIView.GetVirtualLine(AVirtualRow: Integer): TTermCellLine;
@@ -1185,7 +1191,11 @@ procedure TTerminalFPGUIView.HandleRMouseDown(x, y: integer;
   shiftstate: TShiftState);
 begin
   inherited HandleRMouseDown(x, y, shiftstate);
-  if TryMouseReport(x, y, shiftstate, tmbRight, True, False) then Exit;
+  { Default: show the context menu, even when the app has captured mouse.
+    Only forward the right-click to the app when YieldRightClickToApp is set. }
+  if FYieldRightClickToApp
+     and TryMouseReport(x, y, shiftstate, tmbRight, True, False) then
+    Exit;
   FContextMenu.ShowAt(Self, x,y, True);
 end;
 
