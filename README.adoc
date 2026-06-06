@@ -4,10 +4,12 @@
 :source-highlighter: pygments
 :experimental:
 
-A VT/xterm-compatible terminal emulator framework written in Free Pascal, with
-both an fpGUI and an LCL (Lazarus) front-end. Designed as a reusable library:
-the backend, VT parser, and view widgets are independent units that can be
-composed into other applications.
+A VT/xterm-compatible terminal emulator framework written in Free Pascal,
+with **fpGUI, LCL (Lazarus), and GTK4 (C)** front-ends. Designed as a
+reusable library: the backend, VT parser, and view widgets are independent
+units that can be composed into other applications. The GTK4 path goes
+through a C ABI shim (`libtermview.so`) so any C/C++/Vala/Rust host can
+embed it.
 
 image:https://img.shields.io/badge/license-BSD--3--Clause-blue[License]
 image:https://img.shields.io/badge/FPC-3.3.1%2B-success[FPC]
@@ -57,8 +59,11 @@ toc::[]
 TerminalFramework/   Core library (parser, screen model, PTY backends)
 ViewfpGUI/           fpGUI widget that renders a TTerminalController
 ViewLCL/             LCL (Lazarus) widget that renders a TTerminalController
+LibTermView/         Pascal -> C ABI shim (libtermview.so / .a + termview.h)
+ViewGtk4/            GTK4 widget written in C, built on LibTermView
 ExampleTerminal/     Minimal fpGUI demo app
 ExampleTerminalLCL/  Minimal LCL demo app (lazbuild script + pasbuild module)
+ExampleTerminalGtk4/ Minimal GTK4 demo app written in C
 tools/replay/        Trace-replay tool for parser debugging
 tools/build-win64.sh Cross-compile script for Windows x86_64
 tools/sgr-demo.sh    Bash script exercising SGR features
@@ -127,6 +132,23 @@ The LCL example can also be built through Lazarus tooling:
 ----
 ./ExampleTerminalLCL/build.sh   # wraps lazbuild + registers the .lpk deps
 ----
+
+=== GTK4 (C) build
+
+Three pieces: a PIC-compiled Pascal shared library (`libtermview.so`), a
+GTK4 widget written in C (`libtermviewgtk4.so`), and the C demo. Each has
+its own `build.sh`; `make` chains them.
+
+[source,shell]
+----
+make gtk4
+./ExampleTerminalGtk4/target/exampleterminalgtk4
+----
+
+Requires GTK4 ≥ 4.10 (uses `GtkPopoverMenu`, `GtkScrollable`, async
+clipboard) and `pkg-config gtk4 pangocairo`. Embedders include
+`<termview.h>` (the C ABI) and/or `<term_view_widget.h>` (the widget),
+linking `-ltermview -ltermviewgtk4`.
 
 === Windows x86_64 (cross-compile from Linux)
 

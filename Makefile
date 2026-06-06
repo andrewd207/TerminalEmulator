@@ -40,6 +40,9 @@ all:
 	@$(MAKE) --no-print-directory _run STEP=ExampleTerminalLCL     CMD='$(PASBUILD) compile -f $(PROJECT_XML) -m ExampleTerminalLCL -p $(PROFILE)'
 	@$(MAKE) --no-print-directory _run STEP=Replay                 CMD='$(PASBUILD) compile -f $(PROJECT_XML) -m Replay -p $(PROFILE)'
 	@$(MAKE) --no-print-directory _run STEP=ExampleTerminalLCL-lazbuild CMD='./ExampleTerminalLCL/build.sh'
+	@$(MAKE) --no-print-directory _run STEP=LibTermView                CMD='./LibTermView/build.sh'
+	@$(MAKE) --no-print-directory _run STEP=ViewGtk4                   CMD='./ViewGtk4/build.sh'
+	@$(MAKE) --no-print-directory _run STEP=ExampleTerminalGtk4        CMD='./ExampleTerminalGtk4/build.sh'
 	@$(MAKE) --no-print-directory summary
 
 # Internal: run one step, capture status + log, continue on failure.
@@ -98,6 +101,17 @@ replay Replay:
 
 lcl-lazbuild:
 	./ExampleTerminalLCL/build.sh
+
+LibTermView:
+	./LibTermView/build.sh
+
+ViewGtk4: LibTermView
+	./ViewGtk4/build.sh
+
+ExampleTerminalGtk4: ViewGtk4
+	./ExampleTerminalGtk4/build.sh
+
+gtk4: ExampleTerminalGtk4
 
 clean:
 	@for d in TerminalFramework ViewfpGUI ViewLCL ExampleTerminal ExampleTerminalLCL tools/replay; do \
