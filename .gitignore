@@ -3,6 +3,9 @@
 # pasbuild output
 target/
 
+# Lazarus compile output
+lib/
+
 # pasbuild copyright-fix and similar backups
 backup/
 *.bak
