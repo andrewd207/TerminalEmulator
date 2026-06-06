@@ -485,11 +485,7 @@ begin
 
   S := CellText(ACell);
   ACanvas.TextColor := FG;
-  if tafWideLead in ACell.Attrs then
-    R.Width := FCharWidth * 2;
-  ACanvas.SetClipRect(R);
   ACanvas.DrawString(R.Left, R.Top, S);
-  ACanvas.ClearClipRect;
 end;
 
 function TTerminalFPGUIView.PixelToCell(X, Y: Integer): TTermCellPos;
