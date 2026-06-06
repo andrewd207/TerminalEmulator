@@ -765,8 +765,12 @@ begin
     Exit;
 
   case keycode of
-    keyReturn:
+    keyReturn, keyPEnter:
       begin FController.SendKeyEnter; consumed := True; end;
+    keyHome:
+      begin FController.SendInput(#27'[H'); consumed := True; end;
+    keyEnd:
+      begin FController.SendInput(#27'[F'); consumed := True; end;
     keyBackSpace:
       begin FController.SendKeyBackspace; consumed := True; end;
     keyTab:
