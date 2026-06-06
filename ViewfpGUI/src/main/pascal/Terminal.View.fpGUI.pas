@@ -45,6 +45,7 @@ type
     FOnFontChanged: TNotifyEvent;
     FLastMouseReportCol: Integer;
     FLastMouseReportRow: Integer;
+    FShellExited: Boolean;
     function CellSelected(AVirtualRow, ACol: Integer): Boolean;
     procedure ContextMenuItemClick(Sender: TObject);
     procedure ContextPopupShow(Sender: TObject);
@@ -82,6 +83,7 @@ type
     procedure HandlePaint; override;
     procedure HandleResize(AWidth, AHeight: TfpgCoord); override;
     procedure HandleKeyPress(var keycode: word; var shiftstate: TShiftState; var consumed: boolean); override;
+    procedure HandleKeyChar(var AText: TfpgChar; var shiftstate: TShiftState; var consumed: boolean); override;
     procedure HandleLMouseDown(x, y: integer; shiftstate: TShiftState); override;
     procedure HandleMouseMove(x, y: integer; btnstate: word; shiftstate: TShiftState);  override;
     procedure HandleLMouseUp(x, y: integer; shiftstate: TShiftState); override;
@@ -186,6 +188,7 @@ begin
     FController.Core.OnClipboardSet := @CoreClipboardSet;
     FController.Core.OnClipboardGet := @CoreClipboardGet;
     SyncSizeToController;
+    FShellExited := False;
     FTimer.Enabled := True;
   end;
   Repaint;
@@ -233,20 +236,40 @@ begin
 end;
 
 procedure TTerminalFPGUIView.TimerFired(Sender: TObject);
+const
+  EXIT_BANNER: RawByteString =
+    #27'[0m'#13#10#27'[7m[ process exited - close window ]'#27'[0m'#13#10;
 begin
-  if FController <> nil then
+  if FController = nil then Exit;
+
+  if FController.Pump > 0 then
   begin
-    if FController.Pump > 0 then
-    begin
-      FCursorBlinkVisible := True;
-      FCursorTimer.Reset;
-      FCursorTimer.Enabled := True;
-      UpdateScrollBar;
-      FScrollbar.Position := FScrollbar.Max;
-      FTopRow := FScrollbar.Position;
-      if not FController.Core.InSyncUpdate then
-        Repaint;
-    end;
+    FCursorBlinkVisible := True;
+    FCursorTimer.Reset;
+    FCursorTimer.Enabled := True;
+    UpdateScrollBar;
+    FScrollbar.Position := FScrollbar.Max;
+    FTopRow := FScrollbar.Position;
+    if not FController.Core.InSyncUpdate then
+      Repaint;
+  end;
+
+  { Detect child exit. Pump's IsRunning check reaps the process; once it
+    returns False, drain any remaining bytes, post a banner, stop polling. }
+  if (not FShellExited) and (FController.Backend <> nil)
+     and (not FController.Backend.IsRunning) then
+  begin
+    FShellExited := True;
+    FController.Parser.FeedBytes(EXIT_BANNER);
+    FCursorBlinkVisible := False;
+    FCursorTimer.Enabled := False;
+    FTimer.Enabled := False;
+    UpdateScrollBar;
+    Repaint;
+    if (Parent <> nil) and (Parent is TTerminalFPGUIForm)
+       and (TTerminalFPGUIForm(Parent).WindowTitle <> '') then
+      TTerminalFPGUIForm(Parent).WindowTitle :=
+        TTerminalFPGUIForm(Parent).WindowTitle + ' [exited]';
   end;
 end;
 
@@ -866,8 +889,6 @@ begin
 end;
 
 procedure TTerminalFPGUIView.HandleKeyPress(var keycode: word; var shiftstate: TShiftState; var consumed: boolean);
-var
-  Ch: AnsiChar;
 begin
   inherited HandleKeyPress(keycode, shiftstate, consumed);
   if FController = nil then
@@ -961,16 +982,22 @@ begin
     end;
 
 
-    if (keycode >= 32) and (keycode <= 255) then
-    begin
-      Ch := AnsiChar(keycode);
-      if not (ssShift in shiftstate) then
-        Ch := LowerCase(Ch);
-      FController.SendInput(RawByteString(Ch));
-      consumed := True;
-      FScrollbar.Position:=FScrollbar.Max;
-    end;
+    { Printable characters are dispatched via HandleKeyChar, which gives us
+      the layout-translated character; we don't synthesise from keycode. }
   end;
+end;
+
+procedure TTerminalFPGUIView.HandleKeyChar(var AText: TfpgChar;
+  var shiftstate: TShiftState; var consumed: boolean);
+begin
+  if FController = nil then Exit;
+  if AText = '' then Exit;
+  { Drop control-code byte 0..31 — those are handled in HandleKeyPress so
+    Ctrl+letter combinations don't double-fire. }
+  if (Length(AText) = 1) and (AText[1] < #32) then Exit;
+  FController.SendInput(RawByteString(AText));
+  FScrollbar.Position := FScrollbar.Max;
+  consumed := True;
 end;
 
 function TTerminalFPGUIView.TryMouseReport(x, y: Integer; shiftstate: TShiftState;

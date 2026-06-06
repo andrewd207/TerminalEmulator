@@ -1366,19 +1366,24 @@ begin
 end;
 
 procedure TTerminalCore.DbgRecord(const ALine: string);
-var F: TextFile;
+var
+  F: TextFile;
+  Path: string;
 begin
+  { In-memory ring is always kept (DbgDump reads it). On-disk trace is only
+    enabled when the TERM_TRACE env var is set to a writable path. }
   FDbgRing[FDbgRingHead] := ALine;
   FDbgRingHead := (FDbgRingHead + 1) and 255;
   Inc(FDbgCounter);
+  Path := SysUtils.GetEnvironmentVariable('TERM_TRACE');
+  if Path = '' then Exit;
   try
-    AssignFile(F, '/tmp/term-trace.log');
-    if FileExists('/tmp/term-trace.log') then Append(F) else Rewrite(F);
+    AssignFile(F, Path);
+    if FileExists(Path) then Append(F) else Rewrite(F);
     WriteLn(F, '[', FDbgCounter, '] ', ALine);
     CloseFile(F);
   except
-    on E: Exception do
-      WriteLn(StdErr, '[dbg-fail #', FDbgCounter, '] ', E.Message);
+    { Swallow: trace file is best-effort, don't spam stderr. }
   end;
 end;
 

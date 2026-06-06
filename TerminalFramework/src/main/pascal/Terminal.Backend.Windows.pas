@@ -18,11 +18,22 @@ implementation
 interface
 
 uses
-  Classes, SysUtils, Windows, terminal.backend.base;
+  Classes, SysUtils, Windows,
+  Terminal.Backend.Base, Terminal.Core, Terminal.Parser;
 
 type
   HPCON = THandle;
   SIZE_T = NativeUInt;
+
+  { FPC RTL has TStartupInfoW but not the EX variant needed for ConPTY's
+    attribute list (PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE). Mirror the
+    Windows SDK STARTUPINFOEXW shape. }
+  PProcThreadAttributeList = Pointer;
+  TStartupInfoExW = record
+    StartupInfo: TStartupInfoW;
+    lpAttributeList: PProcThreadAttributeList;
+  end;
+  PStartupInfoExW = ^TStartupInfoExW;
 
   TCreatePseudoConsole = function(size: TCoord; hInput, hOutput: THandle; dwFlags: DWORD; out phPC: HPCON): HRESULT; stdcall;
   TResizePseudoConsole = function(hPC: HPCON; size: TCoord): HRESULT; stdcall;
@@ -54,7 +65,7 @@ type
     constructor Create(ACore: TTerminalCore; AParser: TTerminalParser); override;
     destructor Destroy; override;
 
-    function StartShell(const AShell: string = ''; const AArgs: array of string = []): Boolean; override;
+    function StartShell(const AShell: string = ''; const AArgs: array of string): Boolean; override;
     function StartCommand(const AProgram: string; const AArgs: array of string): Boolean; override;
     procedure Stop; override;
     function PumpInput: Integer; override;
@@ -73,6 +84,18 @@ const
   PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = $00020016;
   EXTENDED_STARTUPINFO_PRESENT = $00080000;
   READ_BUFFER_SIZE = 8192;
+
+{ kernel32 imports missing from FPC's Windows unit. Used to thread the ConPTY
+  handle into the child process via PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE. }
+function InitializeProcThreadAttributeList(lpAttributeList: PProcThreadAttributeList;
+  dwAttributeCount, dwFlags: DWORD; var lpSize: SIZE_T): BOOL;
+  stdcall; external 'kernel32' name 'InitializeProcThreadAttributeList';
+function UpdateProcThreadAttribute(lpAttributeList: PProcThreadAttributeList;
+  dwFlags: DWORD; Attribute: NativeUInt; lpValue: Pointer; cbSize: SIZE_T;
+  lpPreviousValue: Pointer; lpReturnSize: Pointer): BOOL;
+  stdcall; external 'kernel32' name 'UpdateProcThreadAttribute';
+procedure DeleteProcThreadAttributeList(lpAttributeList: PProcThreadAttributeList);
+  stdcall; external 'kernel32' name 'DeleteProcThreadAttributeList';
 
 function FAILED(Status: HRESULT): Boolean; inline;
 begin
@@ -250,7 +273,7 @@ var
 begin
   ShellPath := AShell;
   if ShellPath = '' then
-    ShellPath := GetEnvironmentVariable('COMSPEC');
+    ShellPath := SysUtils.GetEnvironmentVariable('COMSPEC');
   if ShellPath = '' then
     ShellPath := 'cmd.exe';
 
