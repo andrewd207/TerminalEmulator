@@ -889,10 +889,15 @@ begin
     // Ctrl codes Ctrl+c etc
     if ([ssCtrl] = shiftstate) then
     begin
-      { Convenience: Ctrl+V pastes when the clipboard holds text. Falls
-        through to the raw ^V byte if the clipboard is empty / image-only,
-        so readline's quoted-insert and vim's visual-block still work. }
-      if (keycode = Ord('V')) and (fpgClipboard.Text <> '') then
+      { Convenience: Ctrl+V pastes when the clipboard holds text AND the
+        app has opted into bracketed paste (?2004). That mode is the app
+        explicitly saying "I handle paste blocks", so it's safe to route
+        Ctrl+V there. Apps that don't enable it (rare full-screen TUIs
+        without paste awareness) still see the raw ^V byte.
+        Shift+Insert is always an unconditional paste escape hatch. }
+      if (keycode = Ord('V'))
+         and (fpgClipboard.Text <> '')
+         and FController.Core.BracketedPasteMode then
       begin
         DoPaste;
         consumed := True;
