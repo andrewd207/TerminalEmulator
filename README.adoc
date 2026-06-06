@@ -1,0 +1,142 @@
+= TerminalEmulator
+:toc: macro
+:toclevels: 2
+:source-highlighter: pygments
+:experimental:
+
+A VT/xterm-compatible terminal emulator framework written in Free Pascal, with
+an fpGUI front-end. Designed as a reusable library: the backend, VT parser,
+and view widget are independent units that can be composed into other
+applications.
+
+image:https://img.shields.io/badge/license-BSD--3--Clause-blue[License]
+image:https://img.shields.io/badge/FPC-3.3.1%2B-success[FPC]
+
+toc::[]
+
+== Features
+
+* VT100 / xterm parser: SGR colors (16 / 256 / truecolor), bold / faint /
+  italic / underline / blink / inverse / hidden / strike, double-width / CJK,
+  combining marks, scroll regions, alternate buffer, sync update (`?2026`).
+* Input: mouse reporting (`?9` / `?1000` / `?1002` / `?1003`, SGR + legacy
+  encoding), bracketed paste (`?2004`), OSC 52 clipboard read/write,
+  `Shift` bypass for native selection.
+* Backends: Unix (forkpty) and Windows (ConPTY); the same Controller drives
+  either.
+* fpGUI widget: scrollback, font + emoji-font fallback, configurable cursor
+  style, palette, and selection colors.
+* No platform-specific paths or hardcoded debug files. Optional tracing
+  gated on env vars (see <<debug,Debug>>).
+
+== Repository layout
+
+[source]
+----
+TerminalFramework/   Core library (parser, screen model, PTY backends)
+ViewfpGUI/           fpGUI widget that renders a TTerminalController
+ExampleTerminal/     Minimal demo app
+tools/replay/        Trace-replay tool for parser debugging
+tools/build-win64.sh Cross-compile script for Windows x86_64
+tools/sgr-demo.sh    Bash script exercising SGR features
+----
+
+== Prerequisites
+
+* https://www.freepascal.org[Free Pascal Compiler] **3.3.1 or newer**
+  (3.2.2 may work but is untested).
+* https://github.com/graemeg/pasbuild[pasbuild] — the Maven-style build
+  tool used for module orchestration.
+* http://fpgui.sourceforge.net[fpGUI Toolkit] 2.1 or newer, installed
+  through pasbuild (the build will look for it in `~/.pasbuild/repository`).
+* For Win64 cross-compile: FPC's `-Twin64` target (bundled with default FPC
+  on Linux; no extra mingw needed for our use).
+
+=== Installing pasbuild and fpGUI
+
+[source,shell]
+----
+# pasbuild from source
+git clone https://github.com/graemeg/pasbuild
+cd pasbuild
+./install.sh        # or follow upstream README
+
+# fpGUI as a pasbuild module
+git clone https://github.com/graemeg/fpgui
+cd fpgui/framework
+pasbuild install -p debug
+----
+
+== Building
+
+=== Linux (or any Unix)
+
+[source,shell]
+----
+pasbuild compile -f project.xml -p debug
+./ExampleTerminal/target/exampleterminal
+----
+
+To build a single module:
+
+[source,shell]
+----
+pasbuild compile -f project.xml -m TerminalFramework -p debug
+pasbuild compile -f project.xml -m ViewfpGUI       -p debug
+pasbuild compile -f project.xml -m ExampleTerminal -p debug
+----
+
+=== Windows x86_64 (cross-compile from Linux)
+
+Requires the fpGUI Win64 ppus at
+`+~/.pasbuild/repository/fpgui-framework/2.1.0/x86_64-win64-3.3.1/+`.
+Build fpGUI itself for that target first (same pasbuild command with
+`-Twin64 -Px86_64` flags appended).
+
+[source,shell]
+----
+tools/build-win64.sh
+# -> target/win64/ExampleTerminal.exe
+----
+
+The script wraps `fpc -Twin64 -Px86_64 -WG` (GUI subsystem) and is
+intentionally short -- adapt it freely.
+
+=== Native Windows build
+
+Same project files, but invoke `pasbuild` from a native FPC install. The
+Windows backend uses ConPTY, so the resulting binary requires
+**Windows 10 1809 or newer**.
+
+== Usage
+
+Embed the controller and view:
+
+[source,pascal]
+----
+uses Terminal.Controller, Terminal.View.fpGUI;
+
+FController := TTerminalController.Create(80, 25, 5000); { cols, rows, scrollback }
+TerminalView.AttachController(FController);
+TerminalView.StartShell;            { defaults to user's shell }
+TerminalView.StartShell('/bin/zsh'); { or an explicit path }
+----
+
+On Windows the default-shell search order is Git Bash -> MSYS2 bash ->
+Cygwin bash -> `%COMSPEC%` (cmd.exe).
+
+[[debug]]
+== Debug tracing
+
+Both traces are off by default. Enable with environment variables:
+
+`TERM_TRACE=/path/to/file`::
+Per-operation log from the screen model (cursor moves, SGR, scrolls).
+
+`TERM_RAW_TRACE=/path/to/file`::
+Raw PTY byte chunks with hex + ASCII annotations.
+Useful with `tools/replay` to deterministically reproduce a parser bug.
+
+== License
+
+BSD 3-Clause. See link:LICENSE[].

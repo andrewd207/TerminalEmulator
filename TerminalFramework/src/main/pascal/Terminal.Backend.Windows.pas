@@ -266,12 +266,32 @@ begin
 end;
 
 function TTerminalBackendWindows.StartShell(const AShell: string; const AArgs: array of string): Boolean;
+const
+  { Preferred order when no shell is requested explicitly: Git Bash, then
+    MSYS2 bash, then Cygwin bash, then COMSPEC (cmd.exe). WSL is intentionally
+    not auto-selected — `wsl.exe` works but boots a Linux distro and feels
+    surprising as a default; explicit StartShell('wsl.exe') still works. }
+  BASH_CANDIDATES: array[0..3] of string = (
+    'C:\Program Files\Git\bin\bash.exe',
+    'C:\Program Files (x86)\Git\bin\bash.exe',
+    'C:\msys64\usr\bin\bash.exe',
+    'C:\cygwin64\bin\bash.exe'
+  );
 var
   ShellPath: string;
   Args: array of string;
   I: Integer;
 begin
   ShellPath := AShell;
+  if ShellPath = '' then
+  begin
+    for I := Low(BASH_CANDIDATES) to High(BASH_CANDIDATES) do
+      if FileExists(BASH_CANDIDATES[I]) then
+      begin
+        ShellPath := BASH_CANDIDATES[I];
+        Break;
+      end;
+  end;
   if ShellPath = '' then
     ShellPath := SysUtils.GetEnvironmentVariable('COMSPEC');
   if ShellPath = '' then
@@ -280,6 +300,13 @@ begin
   SetLength(Args, Length(AArgs));
   for I := 0 to High(AArgs) do
     Args[I] := AArgs[I];
+  { Git Bash and friends want -i for interactive prompt. cmd doesn't care
+    about extra args, but only inject -i when caller passed nothing. }
+  if (Length(Args) = 0) and (Pos('bash.exe', LowerCase(ShellPath)) > 0) then
+  begin
+    SetLength(Args, 1);
+    Args[0] := '-i';
+  end;
   Result := StartCommand(ShellPath, Args);
 end;
 

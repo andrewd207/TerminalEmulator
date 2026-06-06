@@ -250,9 +250,13 @@ var
   I: Integer;
   HexLine, AsciiLine: string;
   B: Byte;
+  Path: string;
 begin
-  AssignFile(F, '/tmp/term-raw.log');
-  if FileExists('/tmp/term-raw.log') then Append(F) else Rewrite(F);
+  { Raw byte trace is opt-in: set TERM_RAW_TRACE=/path/to/file to enable. }
+  Path := SysUtils.GetEnvironmentVariable('TERM_RAW_TRACE');
+  if Path = '' then Exit;
+  AssignFile(F, Path);
+  if FileExists(Path) then Append(F) else Rewrite(F);
   HexLine := '';
   AsciiLine := '';
   for I := 1 to Length(AData) do

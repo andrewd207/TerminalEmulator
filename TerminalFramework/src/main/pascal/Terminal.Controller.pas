@@ -101,12 +101,15 @@ end;
 procedure TTerminalController.Resize(ACols, ARows: Integer);
 var
   F: TextFile;
+  Path: string;
 begin
   FCore.Resize(ACols, ARows);
   FBackend.Resize(ACols, ARows);
+  Path := SysUtils.GetEnvironmentVariable('TERM_RAW_TRACE');
+  if Path = '' then Exit;
   try
-    AssignFile(F, '/tmp/term-raw.log');
-    if FileExists('/tmp/term-raw.log') then Append(F) else Rewrite(F);
+    AssignFile(F, Path);
+    if FileExists(Path) then Append(F) else Rewrite(F);
     WriteLn(F, '--- resize cols=', ACols, ' rows=', ARows, ' ---');
     CloseFile(F);
   except

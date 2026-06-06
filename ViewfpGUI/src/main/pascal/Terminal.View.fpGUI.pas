@@ -43,9 +43,17 @@ type
     FSelectionFGColor: TfpgColor;
     FSelectionBGColor: TfpgColor;
     FOnFontChanged: TNotifyEvent;
+    FOnShellExit: TNotifyEvent;
     FLastMouseReportCol: Integer;
     FLastMouseReportRow: Integer;
     FShellExited: Boolean;
+    { Pending mouse-down state: don't begin a selection until the user has
+      actually dragged past SELECTION_DRAG_THRESHOLD pixels. Bare clicks do
+      not select anything (and clear any prior selection). }
+    FMouseDownPending: Boolean;
+    FMouseDownX: Integer;
+    FMouseDownY: Integer;
+    FMouseDownAnchor: TTermCellPos;
     function CellSelected(AVirtualRow, ACol: Integer): Boolean;
     procedure ContextMenuItemClick(Sender: TObject);
     procedure ContextPopupShow(Sender: TObject);
@@ -104,6 +112,11 @@ type
     property EmojiFontDesc: string read FEmojiFontDesc write FEmojiFontDesc;
     property CursorStyle: TCursorStyle read FCursorStyle write FCursorStyle;
     property OnFontChanged: TNotifyEvent read FOnFontChanged write FOnFontChanged;
+    { Fired once, in the pump-timer context, when the child process exits.
+      If unset, the view writes a default banner into the buffer; assigning a
+      handler suppresses the default. Handlers may e.g. close the parent form. }
+    property OnShellExit: TNotifyEvent read FOnShellExit write FOnShellExit;
+    procedure WriteExitBanner;
   end;
 
   TTerminalFPGUIForm = class(TfpgForm)
@@ -123,6 +136,7 @@ uses
 const
   CURSOR_BLINK_MS = 750;
   PUMP_MS = 20;
+  SELECTION_DRAG_THRESHOLD = 3; { pixels before mouse-down -> selection }
 
   CONTEXT_COPY = 0;
   CONTEXT_PASTE = 1;
@@ -235,10 +249,20 @@ begin
   Repaint;
 end;
 
-procedure TTerminalFPGUIView.TimerFired(Sender: TObject);
+procedure TTerminalFPGUIView.WriteExitBanner;
 const
   EXIT_BANNER: RawByteString =
     #27'[0m'#13#10#27'[7m[ process exited - close window ]'#27'[0m'#13#10;
+begin
+  if FController = nil then Exit;
+  FController.Parser.FeedBytes(EXIT_BANNER);
+  if (Parent <> nil) and (Parent is TTerminalFPGUIForm)
+     and (TTerminalFPGUIForm(Parent).WindowTitle <> '') then
+    TTerminalFPGUIForm(Parent).WindowTitle :=
+      TTerminalFPGUIForm(Parent).WindowTitle + ' [exited]';
+end;
+
+procedure TTerminalFPGUIView.TimerFired(Sender: TObject);
 begin
   if FController = nil then Exit;
 
@@ -255,21 +279,22 @@ begin
   end;
 
   { Detect child exit. Pump's IsRunning check reaps the process; once it
-    returns False, drain any remaining bytes, post a banner, stop polling. }
+    returns False, drain any remaining bytes, fire OnShellExit, stop polling.
+    If no handler is wired, write the default banner so the user sees
+    *something*. The handler may e.g. close the parent form instead. }
   if (not FShellExited) and (FController.Backend <> nil)
      and (not FController.Backend.IsRunning) then
   begin
     FShellExited := True;
-    FController.Parser.FeedBytes(EXIT_BANNER);
     FCursorBlinkVisible := False;
     FCursorTimer.Enabled := False;
     FTimer.Enabled := False;
+    if Assigned(FOnShellExit) then
+      FOnShellExit(Self)
+    else
+      WriteExitBanner;
     UpdateScrollBar;
     Repaint;
-    if (Parent <> nil) and (Parent is TTerminalFPGUIForm)
-       and (TTerminalFPGUIForm(Parent).WindowTitle <> '') then
-      TTerminalFPGUIForm(Parent).WindowTitle :=
-        TTerminalFPGUIForm(Parent).WindowTitle + ' [exited]';
   end;
 end;
 
@@ -287,12 +312,38 @@ procedure TTerminalFPGUIView.CoreInvalidate(Sender: TObject; const ARect: TTermR
 var
   L, T, W, H: Integer;
   HistCount: Integer;
+  SelMinVRow, SelMaxVRow: Integer;
 begin
   UpdateMetrics;
 
   HistCount := 0;
   if FController <> nil then
     HistCount := FController.Core.HistoryCount;
+
+  { Drop the entire selection if the invalidated region overlaps any cell of
+    it. ARect is in screen-relative rows (0..Rows-1); selection rows are
+    virtual (history + screen), so map by adding HistCount. We only need
+    row-overlap because new writes touch whole columns conservatively
+    enough that any row-overlap is "part of the selection got overwritten". }
+  if FSelection.Active then
+  begin
+    if FSelection.Anchor.Row <= FSelection.Focus.Row then
+    begin
+      SelMinVRow := FSelection.Anchor.Row;
+      SelMaxVRow := FSelection.Focus.Row;
+    end
+    else
+    begin
+      SelMinVRow := FSelection.Focus.Row;
+      SelMaxVRow := FSelection.Anchor.Row;
+    end;
+    if (SelMaxVRow >= HistCount + ARect.Top)
+       and (SelMinVRow <= HistCount + ARect.Bottom) then
+    begin
+      FSelection.Active := False;
+      FSelection.Selecting := False;
+    end;
+  end;
 
   L := ARect.Left * FCharWidth;
   T := (HistCount + ARect.Top - FTopRow) * FCharHeight;
@@ -447,7 +498,7 @@ var
   S: String;
 begin
   S := FFontDesc;
-  if SelectFontDialog(S, 'mono') then
+  if SelectFontDialog(S) then
   begin
      FontDesc:=S;
      if Assigned(FOnFontChanged) then
@@ -462,7 +513,7 @@ var
   S: String;
 begin
   S := FEmojiFontDesc;
-  if SelectFontDialog(S, '') then
+  if SelectFontDialog(S) then
   begin
     FEmojiFontDesc := S;
     if Assigned(FOnFontChanged) then
@@ -1039,14 +1090,27 @@ end;
 
 procedure TTerminalFPGUIView.HandleLMouseDown(x, y: integer;
   shiftstate: TShiftState);
+var
+  HadSelection: Boolean;
 begin
+  { Close any open context menu first. fpGUI on Windows doesn't always
+    dismiss popups on a click into the owning widget. }
+  if (FContextMenu <> nil) and (FContextMenu.Window <> nil)
+     and FContextMenu.Window.HasHandle then
+    FContextMenu.Close;
   if TryMouseReport(x, y, shiftstate, tmbLeft, True, False) then Exit;
-  FSelection.Active := True;
-  //FSelection.Selecting := True; // only true after the cell changes
-  FSelection.Mode := tsmLinear;
-  FSelection.Anchor := PixelToCell(x, y);
-  FSelection.Focus := FSelection.Anchor;
-  Repaint;
+  { Clear any prior selection on a fresh click. We don't activate a new
+    selection here -- that waits until the mouse has actually moved past
+    SELECTION_DRAG_THRESHOLD pixels (see HandleMouseMove). }
+  HadSelection := FSelection.Active;
+  FSelection.Active := False;
+  FSelection.Selecting := False;
+  FMouseDownPending := True;
+  FMouseDownX := X;
+  FMouseDownY := Y;
+  FMouseDownAnchor := PixelToCell(x, y);
+  if HadSelection then
+    Repaint;
 end;
 
 procedure TTerminalFPGUIView.HandleMouseMove(x, y: integer; btnstate: word;
@@ -1081,14 +1145,24 @@ begin
   if (btnstate and MOUSE_LEFT) = 0 then
     Exit;
 
-  Cell := PixelToCell(x, y);
-
-  if FSelection.Active and not FSelection.Selecting and
-     ((Cell.Row <> FSelection.Anchor.Row) or (Cell.Col <> FSelection.Anchor.Col)) then
+  { Latch from pending into an active drag-selection once the mouse moves
+    past the threshold. }
+  if FMouseDownPending and not FSelection.Selecting then
+  begin
+    if (Abs(X - FMouseDownX) < SELECTION_DRAG_THRESHOLD)
+       and (Abs(Y - FMouseDownY) < SELECTION_DRAG_THRESHOLD) then
+      Exit;
+    FSelection.Active := True;
     FSelection.Selecting := True;
+    FSelection.Mode := tsmLinear;
+    FSelection.Anchor := FMouseDownAnchor;
+    FSelection.Focus := FMouseDownAnchor;
+    FMouseDownPending := False;
+  end;
 
   if FSelection.Active and FSelection.Selecting then
   begin
+    Cell := PixelToCell(x, y);
     FSelection.Focus := Cell;
     Repaint;
   end;
@@ -1098,6 +1172,7 @@ procedure TTerminalFPGUIView.HandleLMouseUp(x, y: integer;
   shiftstate: TShiftState);
 begin
   if TryMouseReport(x, y, shiftstate, tmbLeft, False, False) then Exit;
+  FMouseDownPending := False;
   if FSelection.Active and FSelection.Selecting then
   begin
     FSelection.Focus := PixelToCell(x, y);
