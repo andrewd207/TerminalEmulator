@@ -76,6 +76,7 @@ type
     procedure DispatchCSI(AFinal: AnsiChar);
     procedure DispatchSGR;
     procedure DispatchOSC(const AText: RawByteString);
+    procedure HandleOSC52(const APayload: RawByteString);
     procedure DispatchDCS;
     procedure AppendOSCByte(B: Byte);
     procedure AppendDCSByte(B: Byte);
@@ -103,7 +104,7 @@ type
 implementation
 
 uses
-  Math, StrUtils;
+  Math, StrUtils, base64;
 
 constructor TTerminalParser.Create(ACore: TTerminalCore);
 begin
@@ -481,7 +482,47 @@ begin
   Code := StrToIntDef(string(CodeText), -1);
   case Code of
     0, 2: FCore.SetWindowTitle(string(Payload));
+    52:   HandleOSC52(Payload);
   end;
+end;
+
+procedure TTerminalParser.HandleOSC52(const APayload: RawByteString);
+var
+  SemiPos: SizeInt;
+  Targets: string;
+  Data: RawByteString;
+  Decoded, Reply, Encoded: RawByteString;
+begin
+  { OSC 52 ; Pc ; Pd  -- Pc is selection target(s), Pd is base64 or '?' to query. }
+  SemiPos := Pos(';', string(APayload));
+  if SemiPos > 0 then
+  begin
+    Targets := string(Copy(APayload, 1, SemiPos - 1));
+    Data := Copy(APayload, SemiPos + 1, Length(APayload) - SemiPos);
+  end
+  else
+  begin
+    Targets := string(APayload);
+    Data := '';
+  end;
+
+  if Data = '?' then
+  begin
+    { Read request: ask host for current clipboard, base64-encode, reply with same shape. }
+    if FCore.FireClipboardGet(Targets, Reply) then
+    begin
+      Encoded := EncodeStringBase64(Reply);
+      FCore.WriteReply(#27']52;' + RawByteString(Targets) + ';' + Encoded + #27'\');
+    end;
+    Exit;
+  end;
+
+  try
+    Decoded := DecodeStringBase64(Data);
+  except
+    Decoded := '';
+  end;
+  FCore.FireClipboardSet(Targets, Decoded);
 end;
 
 procedure TTerminalParser.DispatchDCS;
@@ -531,7 +572,23 @@ begin
       case P of
         6: FCore.SetOriginMode(AEnable);
         7: FCore.SetAutoWrap(AEnable);
+        9:  { X10 mouse tracking }
+          if AEnable then FCore.SetMouseProtocol(tmpX10)
+          else FCore.SetMouseProtocol(tmpNone);
         25: FCore.SetCursorVisible(AEnable);
+        1000: { VT200 mouse tracking }
+          if AEnable then FCore.SetMouseProtocol(tmpVT200)
+          else FCore.SetMouseProtocol(tmpNone);
+        1002: { Button-event tracking }
+          if AEnable then FCore.SetMouseProtocol(tmpBtnEvent)
+          else FCore.SetMouseProtocol(tmpNone);
+        1003: { Any-event tracking }
+          if AEnable then FCore.SetMouseProtocol(tmpAnyEvent)
+          else FCore.SetMouseProtocol(tmpNone);
+        1006: { SGR encoding }
+          if AEnable then FCore.SetMouseEncoding(tmeSGR)
+          else FCore.SetMouseEncoding(tmeDefault);
+        2004: FCore.BracketedPasteMode := AEnable;
         47:
           if AEnable then
             FCore.SwitchToAltBuffer(False)

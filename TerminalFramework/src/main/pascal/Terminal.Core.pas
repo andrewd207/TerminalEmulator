@@ -148,6 +148,28 @@ type
     Focus: TTermCellPos;
   end;
 
+  TTermMouseProtocol = (
+    tmpNone,       { reporting disabled }
+    tmpX10,        { ?9  press only }
+    tmpVT200,      { ?1000 press + release }
+    tmpBtnEvent,   { ?1002 press + release + motion while button held }
+    tmpAnyEvent    { ?1003 press + release + all motion }
+  );
+
+  TTermMouseEncoding = (
+    tmeDefault,    { legacy   ESC[M Cb Cx Cy (+32 offset, capped at 223) }
+    tmeSGR         { ?1006    ESC[<b;x;yM/m }
+  );
+
+  TTermMouseButton = (
+    tmbLeft   = 0,
+    tmbMiddle = 1,
+    tmbRight  = 2,
+    tmbRelease = 3,  { default-encoding release (button unknown) }
+    tmbWheelUp   = 64,
+    tmbWheelDown = 65
+  );
+
   TTermPen = record
     Attrs: TTermAttrFlags;
     FG: TTermColor;
@@ -165,6 +187,10 @@ type
   TTerminalBellEvent = procedure(Sender: TObject) of object;
   TTerminalTitleEvent = procedure(Sender: TObject; const ATitle: string) of object;
   TTerminalWriteEvent = procedure(Sender: TObject; const AData: RawByteString) of object;
+  { Fired for OSC 52 clipboard writes. ATargets is the Pc field ('c','p','s', combinations, or empty=>'s0' per xterm). AText is the decoded UTF-8 payload. }
+  TTerminalClipboardSetEvent = procedure(Sender: TObject; const ATargets: string; const AText: RawByteString) of object;
+  { Fired for OSC 52 clipboard reads. Handler should set AText to the current clipboard contents. }
+  TTerminalClipboardGetEvent = procedure(Sender: TObject; const ATargets: string; out AText: RawByteString) of object;
 
   { TTermScreenBuffer }
 
@@ -226,11 +252,15 @@ type
     FAutoWrap: Boolean;
     FOriginMode: Boolean;
     FInsertMode: Boolean;
+    FMouseProtocol: TTermMouseProtocol;
+    FMouseEncoding: TTermMouseEncoding;
     FTabStops: array of Boolean;
     FOnInvalidate: TTerminalInvalidateEvent;
     FOnBell: TTerminalBellEvent;
     FOnTitle: TTerminalTitleEvent;
     FOnWrite: TTerminalWriteEvent;
+    FOnClipboardSet: TTerminalClipboardSetEvent;
+    FOnClipboardGet: TTerminalClipboardGetEvent;
     FSyncDepth: Integer;
     FSyncDirty: TTermRect;
     FSyncDirtyValid: Boolean;
@@ -314,6 +344,16 @@ type
     procedure SetInsertMode(AValue: Boolean);
     procedure SetCursorVisible(AValue: Boolean);
 
+    procedure SetMouseProtocol(AValue: TTermMouseProtocol);
+    procedure SetMouseEncoding(AValue: TTermMouseEncoding);
+    { Build and send a mouse report to the host (PTY).
+      ACol/ARow are 0-based screen coordinates.
+      For wheel events, use AButton in {tmbWheelUp, tmbWheelDown} and APressed=True. }
+    procedure SendMouse(AButton: TTermMouseButton; ACol, ARow: Integer;
+      APressed, AMotion, AShift, AAlt, ACtrl: Boolean);
+    property MouseProtocol: TTermMouseProtocol read FMouseProtocol;
+    property MouseEncoding: TTermMouseEncoding read FMouseEncoding;
+
     procedure ResetPen;
     procedure SetBold(AValue: Boolean);
     procedure SetFaint(AValue: Boolean);
@@ -352,6 +392,10 @@ type
     property OnBell: TTerminalBellEvent read FOnBell write FOnBell;
     property OnTitle: TTerminalTitleEvent read FOnTitle write FOnTitle;
     property OnWrite: TTerminalWriteEvent read FOnWrite write FOnWrite;
+    property OnClipboardSet: TTerminalClipboardSetEvent read FOnClipboardSet write FOnClipboardSet;
+    property OnClipboardGet: TTerminalClipboardGetEvent read FOnClipboardGet write FOnClipboardGet;
+    procedure FireClipboardSet(const ATargets: string; const AText: RawByteString);
+    function FireClipboardGet(const ATargets: string; out AText: RawByteString): Boolean;
   end;
 
 
@@ -1489,6 +1533,8 @@ begin
   FOriginMode := False;
   FInsertMode := False;
   FBracketedPasteMode := False;
+  FMouseProtocol := tmpNone;
+  FMouseEncoding := tmeDefault;
 
   SetTabStopDefaults;
 
@@ -2179,6 +2225,79 @@ begin
   InvalidateRect(FCursor.Col, FCursor.Row, FCursor.Col, FCursor.Row);
 end;
 
+procedure TTerminalCore.SetMouseProtocol(AValue: TTermMouseProtocol);
+begin
+  FMouseProtocol := AValue;
+end;
+
+procedure TTerminalCore.SetMouseEncoding(AValue: TTermMouseEncoding);
+begin
+  FMouseEncoding := AValue;
+end;
+
+procedure TTerminalCore.SendMouse(AButton: TTermMouseButton; ACol, ARow: Integer;
+  APressed, AMotion, AShift, AAlt, ACtrl: Boolean);
+var
+  Cb, X, Y: Integer;
+  IsWheel: Boolean;
+  S: RawByteString;
+begin
+  if FMouseProtocol = tmpNone then Exit;
+  if not Assigned(FOnWrite) then Exit;
+
+  { Filter by protocol. Wheel events report under any active protocol >= VT200. }
+  IsWheel := (AButton = tmbWheelUp) or (AButton = tmbWheelDown);
+  case FMouseProtocol of
+    tmpX10:
+      if (not APressed) or AMotion then Exit;
+    tmpVT200:
+      if AMotion then Exit;
+    tmpBtnEvent:
+      if AMotion and (not APressed) and (not IsWheel) then Exit; { only motion-with-button }
+    tmpAnyEvent: ;
+  end;
+
+  Cb := Integer(AButton) and $FF;
+  if AShift then Cb := Cb or 4;
+  if AAlt   then Cb := Cb or 8;
+  if ACtrl  then Cb := Cb or 16;
+  if AMotion and not IsWheel then Cb := Cb or 32;
+
+  X := ACol + 1;
+  Y := ARow + 1;
+  if X < 1 then X := 1;
+  if Y < 1 then Y := 1;
+
+  case FMouseEncoding of
+    tmeSGR:
+      begin
+        { In SGR, button is the real button (not 3 for release); 'M' = press/motion, 'm' = release. }
+        if AButton = tmbRelease then Cb := 0 or (Cb and not $03);
+        S := #27 + '[<' + RawByteString(IntToStr(Cb)) + ';' +
+             RawByteString(IntToStr(X)) + ';' +
+             RawByteString(IntToStr(Y));
+        if APressed or IsWheel or AMotion then
+          S := S + 'M'
+        else
+          S := S + 'm';
+        WriteReply(S);
+      end;
+    tmeDefault:
+      begin
+        { Legacy: release is button=3; cap col/row at 223 (255-32). }
+        if (not APressed) and (not IsWheel) then
+          Cb := (Cb and not $03) or 3;
+        if X > 223 then X := 223;
+        if Y > 223 then Y := 223;
+        S := #27 + '[M' +
+             AnsiChar(Byte(Cb + 32)) +
+             AnsiChar(Byte(X + 32)) +
+             AnsiChar(Byte(Y + 32));
+        WriteReply(S);
+      end;
+  end;
+end;
+
 procedure TTerminalCore.ResetPen;
 begin
   FPen := FDefaultPen;
@@ -2270,6 +2389,20 @@ procedure TTerminalCore.WriteReply(const AData: RawByteString);
 begin
   if Assigned(FOnWrite) then
     FOnWrite(Self, AData);
+end;
+
+procedure TTerminalCore.FireClipboardSet(const ATargets: string; const AText: RawByteString);
+begin
+  if Assigned(FOnClipboardSet) then
+    FOnClipboardSet(Self, ATargets, AText);
+end;
+
+function TTerminalCore.FireClipboardGet(const ATargets: string; out AText: RawByteString): Boolean;
+begin
+  AText := '';
+  Result := Assigned(FOnClipboardGet);
+  if Result then
+    FOnClipboardGet(Self, ATargets, AText);
 end;
 
 function TTerminalCore.GetCell(ACol, ARow: Integer): TTermCell;

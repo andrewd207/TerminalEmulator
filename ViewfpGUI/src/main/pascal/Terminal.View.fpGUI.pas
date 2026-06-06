@@ -34,6 +34,8 @@ type
     FSelectionFGColor: TfpgColor;
     FSelectionBGColor: TfpgColor;
     FOnFontChanged: TNotifyEvent;
+    FLastMouseReportCol: Integer;
+    FLastMouseReportRow: Integer;
     function CellSelected(AVirtualRow, ACol: Integer): Boolean;
     procedure ContextMenuItemClick(Sender: TObject);
     procedure ContextPopupShow(Sender: TObject);
@@ -45,6 +47,8 @@ type
     procedure CoreInvalidate(Sender: TObject; const ARect: TTermRect);
     procedure CoreBell(Sender: TObject);
     procedure CoreTitle(Sender: TObject; const ATitle: string);
+    procedure CoreClipboardSet(Sender: TObject; const ATargets: string; const AText: RawByteString);
+    procedure CoreClipboardGet(Sender: TObject; const ATargets: string; out AText: RawByteString);
     procedure UpdateMetrics;
     procedure SyncSizeToController;
     function RowsVisible: Integer;
@@ -56,6 +60,8 @@ type
     function PickFont(const AAttrs: TTermAttrFlags; ACodePoint: Cardinal): TfpgFontResourceBase;
     procedure PaintCell(const ACanvas: TfpgCanvas; ACol, AViewRow: Integer; const ACell: TTermCell; AHasCursor: Boolean); inline;
     function PixelToCell(X, Y: Integer): TTermCellPos;
+    function TryMouseReport(x, y: Integer; shiftstate: TShiftState;
+      AButton: TTermMouseButton; APressed, AMotion: Boolean): Boolean;
     procedure UpdateScrollBarCoords;
     procedure UpdateScrollBar;
     procedure CreatePopupMenu;
@@ -168,6 +174,8 @@ begin
     FController.Core.OnInvalidate := @CoreInvalidate;
     FController.Core.OnBell := @CoreBell;
     FController.Core.OnTitle := @CoreTitle;
+    FController.Core.OnClipboardSet := @CoreClipboardSet;
+    FController.Core.OnClipboardGet := @CoreClipboardGet;
     SyncSizeToController;
     FTimer.Enabled := True;
   end;
@@ -181,6 +189,8 @@ begin
     FController.Core.OnInvalidate := nil;
     FController.Core.OnBell := nil;
     FController.Core.OnTitle := nil;
+    FController.Core.OnClipboardSet := nil;
+    FController.Core.OnClipboardGet := nil;
     FController.Stop;
     FController := nil; // Not managed by the view. it's 'attached' here. So don't free.
   end;
@@ -304,6 +314,19 @@ begin
   and (Parent is TTerminalFPGUIForm)
   and (TTerminalFPGUIForm(Parent).WindowTitle <> '') then
     TTerminalFPGUIForm(Parent).WindowTitle := ATitle;
+end;
+
+procedure TTerminalFPGUIView.CoreClipboardSet(Sender: TObject;
+  const ATargets: string; const AText: RawByteString);
+begin
+  { OSC 52 write from the app (e.g. Claude Code's Ctrl+Shift+C). }
+  fpgClipboard.Text := UTF8String(AText);
+end;
+
+procedure TTerminalFPGUIView.CoreClipboardGet(Sender: TObject;
+  const ATargets: string; out AText: RawByteString);
+begin
+  AText := RawByteString(fpgClipboard.Text);
 end;
 
 procedure TTerminalFPGUIView.UpdateMetrics;
@@ -866,6 +889,15 @@ begin
     // Ctrl codes Ctrl+c etc
     if ([ssCtrl] = shiftstate) then
     begin
+      { Convenience: Ctrl+V pastes when the clipboard holds text. Falls
+        through to the raw ^V byte if the clipboard is empty / image-only,
+        so readline's quoted-insert and vim's visual-block still work. }
+      if (keycode = Ord('V')) and (fpgClipboard.Text <> '') then
+      begin
+        DoPaste;
+        consumed := True;
+        Exit;
+      end;
       consumed:=True;
       case keycode of
         keyA..keyZ: FController.SendInput(RawByteString(AnsiChar(keycode and $1F)));
@@ -883,16 +915,27 @@ begin
     // Ctrl+Shift shortcuts (copy/paste)
     if [ssShift, ssCtrl] = shiftstate then
     begin
-      repeat
-        case keycode of
-          Ord('C'): DoCopy;
-          Ord('V'): DoPaste;
-        else
-          break;
-        end;
-        consumed:=True;
-        Exit;
-      until True;
+      case keycode of
+        Ord('C'):
+          begin
+            { Only intercept Ctrl+Shift+C when we have a terminal selection.
+              Otherwise forward to the PTY (as a CSI u "modifyOtherKeys"
+              sequence) so apps like Claude Code can grab their own selection
+              and ship it via OSC 52. }
+            if FSelection.Active and FSelection.Selecting then
+              DoCopy
+            else
+              FController.SendInput(#27'[99;6u');
+            consumed := True;
+            Exit;
+          end;
+        Ord('V'):
+          begin
+            DoPaste;
+            consumed := True;
+            Exit;
+          end;
+      end;
     end;
 
     // Shift+Insert (paste)
@@ -916,9 +959,47 @@ begin
   end;
 end;
 
+function TTerminalFPGUIView.TryMouseReport(x, y: Integer; shiftstate: TShiftState;
+  AButton: TTermMouseButton; APressed, AMotion: Boolean): Boolean;
+var
+  Col, Row: Integer;
+  Core: TTerminalCore;
+begin
+  Result := False;
+  if FController = nil then Exit;
+  Core := FController.Core;
+  if Core.MouseProtocol = tmpNone then Exit;
+  { Shift bypasses mouse reporting so the user can select/right-click as usual. }
+  if ssShift in shiftstate then Exit;
+  if (FCharWidth <= 0) or (FCharHeight <= 0) then Exit;
+
+  Col := X div FCharWidth;
+  Row := Y div FCharHeight;
+  if Col < 0 then Col := 0;
+  if Row < 0 then Row := 0;
+  if Col >= Core.Cols then Col := Core.Cols - 1;
+  if Row >= Core.Rows then Row := Core.Rows - 1;
+
+  if AMotion then
+  begin
+    if (Col = FLastMouseReportCol) and (Row = FLastMouseReportRow) then
+    begin
+      Result := True;
+      Exit;
+    end;
+  end;
+  FLastMouseReportCol := Col;
+  FLastMouseReportRow := Row;
+
+  Core.SendMouse(AButton, Col, Row, APressed, AMotion,
+    ssShift in shiftstate, ssAlt in shiftstate, ssCtrl in shiftstate);
+  Result := True;
+end;
+
 procedure TTerminalFPGUIView.HandleLMouseDown(x, y: integer;
   shiftstate: TShiftState);
 begin
+  if TryMouseReport(x, y, shiftstate, tmbLeft, True, False) then Exit;
   FSelection.Active := True;
   //FSelection.Selecting := True; // only true after the cell changes
   FSelection.Mode := tsmLinear;
@@ -931,8 +1012,30 @@ procedure TTerminalFPGUIView.HandleMouseMove(x, y: integer; btnstate: word;
   shiftstate: TShiftState);
 var
   Cell: TTermCellPos;
+  Btn: TTermMouseButton;
+  HasButton: Boolean;
 begin
   inherited HandleMouseMove(x, y, btnstate, shiftstate);
+
+  if (FController <> nil) and (FController.Core.MouseProtocol <> tmpNone)
+     and not (ssShift in shiftstate) then
+  begin
+    HasButton := True;
+    if (btnstate and MOUSE_LEFT) <> 0 then
+      Btn := tmbLeft
+    else if (btnstate and MOUSE_MIDDLE) <> 0 then
+      Btn := tmbMiddle
+    else if (btnstate and MOUSE_RIGHT) <> 0 then
+      Btn := tmbRight
+    else
+    begin
+      HasButton := False;
+      Btn := tmbRelease; { motion-without-button is encoded as button 3 |32 }
+    end;
+    if HasButton or (FController.Core.MouseProtocol = tmpAnyEvent) then
+      TryMouseReport(x, y, shiftstate, Btn, HasButton, True);
+    Exit;
+  end;
 
   if (btnstate and MOUSE_LEFT) = 0 then
     Exit;
@@ -953,6 +1056,7 @@ end;
 procedure TTerminalFPGUIView.HandleLMouseUp(x, y: integer;
   shiftstate: TShiftState);
 begin
+  if TryMouseReport(x, y, shiftstate, tmbLeft, False, False) then Exit;
   if FSelection.Active and FSelection.Selecting then
   begin
     FSelection.Focus := PixelToCell(x, y);
@@ -965,6 +1069,7 @@ procedure TTerminalFPGUIView.HandleRMouseDown(x, y: integer;
   shiftstate: TShiftState);
 begin
   inherited HandleRMouseDown(x, y, shiftstate);
+  if TryMouseReport(x, y, shiftstate, tmbRight, True, False) then Exit;
   FContextMenu.ShowAt(Self, x,y, True);
 end;
 
@@ -977,7 +1082,20 @@ end;
 
 procedure TTerminalFPGUIView.HandleMouseScroll(x, y: integer;
   shiftstate: TShiftState; delta: smallint);
+var
+  Btn: TTermMouseButton;
+  I, Steps: Integer;
 begin
+  if (FController <> nil) and (FController.Core.MouseProtocol <> tmpNone)
+     and not (ssShift in shiftstate) then
+  begin
+    if delta < 0 then Btn := tmbWheelUp else Btn := tmbWheelDown;
+    Steps := Abs(delta);
+    if Steps < 1 then Steps := 1;
+    for I := 1 to Steps do
+      TryMouseReport(x, y, shiftstate, Btn, True, False);
+    Exit;
+  end;
   ScrollBy(delta);
 end;
 
