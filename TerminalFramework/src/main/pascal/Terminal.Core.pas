@@ -1137,9 +1137,9 @@ begin
   if Cell <> nil then
     Cell^ := ACell;
 
-  if (ACell.CodePoint >= 32) and (ACell.CodePoint < 127) then
-    DbgRecord(Format('PUT alt=%d r=%d c=%d ch=%s',
-      [Integer(Byte(FUseAltBuffer)), FCursor.Row, FCursor.Col, Chr(ACell.CodePoint)]));
+  if FUseAltBuffer and (FCursor.Row >= 35) then
+    DbgRecord(Format('PUT-SUSPECT alt=%d r=%d c=%d cp=%d cluster="%s"',
+      [Integer(Byte(FUseAltBuffer)), FCursor.Row, FCursor.Col, ACell.CodePoint, ACell.Cluster]));
 
   InvalidateRect(FCursor.Col, FCursor.Row, FCols - 1, FCursor.Row);
 

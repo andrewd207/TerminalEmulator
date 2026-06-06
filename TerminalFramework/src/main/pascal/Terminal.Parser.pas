@@ -694,7 +694,14 @@ begin
     Exit;
   end;
 
-  if IsC1(B) then
+  { C1 controls (0x80-0x9F) only execute when we're not inside a string-
+    accumulating state. Inside OSC/DCS/SOS/PM/APC, the bytes are payload —
+    notably UTF-8 continuation bytes of multibyte glyphs in the OSC title can
+    legitimately land in the 0x80-0x9F range (e.g. 0x90 inside U+2810). }
+  if (FState <> tpsOSCString) and (FState <> tpsDCSPassthrough)
+     and (FState <> tpsDCSEntry) and (FState <> tpsDCSParam)
+     and (FState <> tpsDCSIntermediate) and (FState <> tpsDCSIgnore)
+     and (FState <> tpsSOSPMAPCString) and IsC1(B) then
   begin
     ExecuteC1(B);
     Exit;
