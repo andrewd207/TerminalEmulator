@@ -39,6 +39,11 @@ type
     function WriteInput(const AData: RawByteString): Integer; virtual; abstract;
     function Resize(ACols, ARows: Integer): Boolean; virtual; abstract;
     function IsRunning: Boolean; virtual; abstract;
+    { True when the PTY's foreground process group is something other than
+      the shell itself — i.e. the shell has spawned a child that's currently
+      in the foreground. Returns False if the backend can't determine this
+      (e.g. ConPTY on Windows). }
+    function SubProcessRunning: Boolean; virtual;
 
     property Core: TTerminalCore read FCore;
     property Parser: TTerminalParser read FParser;
@@ -70,6 +75,11 @@ end;
 destructor TTerminalBackendBase.Destroy;
 begin
   inherited Destroy;
+end;
+
+function TTerminalBackendBase.SubProcessRunning: Boolean;
+begin
+  Result := False;
 end;
 
 end.

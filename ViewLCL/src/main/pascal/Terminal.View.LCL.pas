@@ -57,11 +57,17 @@ type
     FMouseDownY: Integer;
     FMouseDownAnchor: TTermCellPos;
     FMiCopy, FMiPaste, FMiFont, FMiEmoji: TMenuItem;
+    FMiCopyHtmlSel, FMiCopyHtmlScreen, FMiCopyHtmlAll: TMenuItem;
     function CellSelected(AVirtualRow, ACol: Integer): Boolean;
     procedure ContextCopyClick(Sender: TObject);
     procedure ContextPasteClick(Sender: TObject);
     procedure ContextFontClick(Sender: TObject);
     procedure ContextEmojiFontClick(Sender: TObject);
+    procedure ContextCopyHtmlSelClick(Sender: TObject);
+    procedure ContextCopyHtmlScreenClick(Sender: TObject);
+    procedure ContextCopyHtmlAllClick(Sender: TObject);
+    procedure CopyHtmlToClipboard(const AHtml: RawByteString);
+    function SnapshotTitle: string;
     procedure ContextPopupShow(Sender: TObject);
     function GetSelectedTextUTF8: RawByteString;
     function GetVirtualLine(AVirtualRow: Integer): TTermCellLine;
@@ -438,6 +444,24 @@ begin
   FMiEmoji.Caption := 'Emoji Font...';
   FMiEmoji.OnClick := @ContextEmojiFontClick;
   FContextMenu.Items.Add(FMiEmoji);
+
+  FContextMenu.Items.AddSeparator;
+
+  FMiCopyHtmlSel := TMenuItem.Create(FContextMenu);
+  FMiCopyHtmlSel.Caption := 'Copy Selection as HTML';
+  FMiCopyHtmlSel.OnClick := @ContextCopyHtmlSelClick;
+  FContextMenu.Items.Add(FMiCopyHtmlSel);
+
+  FMiCopyHtmlScreen := TMenuItem.Create(FContextMenu);
+  FMiCopyHtmlScreen.Caption := 'Copy Screen as HTML';
+  FMiCopyHtmlScreen.OnClick := @ContextCopyHtmlScreenClick;
+  FContextMenu.Items.Add(FMiCopyHtmlScreen);
+
+  FMiCopyHtmlAll := TMenuItem.Create(FContextMenu);
+  FMiCopyHtmlAll.Caption := 'Copy Everything (incl. scrollback) as HTML';
+  FMiCopyHtmlAll.OnClick := @ContextCopyHtmlAllClick;
+  FContextMenu.Items.Add(FMiCopyHtmlAll);
+
   { Intentionally do NOT assign Self.PopupMenu — MouseDown calls PopUp manually
     so we can suppress it when the app has captured mouse via mouse-reporting. }
 end;
@@ -687,6 +711,45 @@ procedure TTerminalLCLView.ContextPasteClick(Sender: TObject); begin DoPaste; en
 procedure TTerminalLCLView.ContextFontClick(Sender: TObject); begin DoChangeFont; end;
 procedure TTerminalLCLView.ContextEmojiFontClick(Sender: TObject); begin DoChangeEmojiFont; end;
 
+procedure TTerminalLCLView.CopyHtmlToClipboard(const AHtml: RawByteString);
+begin
+  if AHtml = '' then Exit;
+  { LCL's Clipboard.AsText only writes plain text. Most rich-text-aware
+    consumers (browsers, email clients, word processors) will accept HTML
+    pasted as plain text and either preserve the markup or render it.
+    Future enhancement: register a CF_HTML / text/html clipboard format. }
+  Clipboard.AsText := AHtml;
+end;
+
+function TTerminalLCLView.SnapshotTitle: string;
+var
+  C: TControl;
+begin
+  C := Self;
+  while (C <> nil) and not (C is TCustomForm) do
+    C := C.Parent;
+  if C <> nil then Result := TCustomForm(C).Caption
+  else Result := '';
+end;
+
+procedure TTerminalLCLView.ContextCopyHtmlSelClick(Sender: TObject);
+begin
+  if (FController = nil) or not FSelection.Active then Exit;
+  CopyHtmlToClipboard(FController.Core.GetHtmlSelection(FSelection, SnapshotTitle));
+end;
+
+procedure TTerminalLCLView.ContextCopyHtmlScreenClick(Sender: TObject);
+begin
+  if FController = nil then Exit;
+  CopyHtmlToClipboard(FController.Core.GetHtmlScreen(SnapshotTitle));
+end;
+
+procedure TTerminalLCLView.ContextCopyHtmlAllClick(Sender: TObject);
+begin
+  if FController = nil then Exit;
+  CopyHtmlToClipboard(FController.Core.GetHtmlAll(SnapshotTitle));
+end;
+
 procedure TTerminalLCLView.ContextPopupShow(Sender: TObject);
 var
   AppOwnsClipboard, HasPasteable: Boolean;
@@ -702,6 +765,11 @@ begin
                or Clipboard.HasFormat(CF_PICTURE)
                or Clipboard.HasFormat(CF_BITMAP);
   FMiPaste.Enabled := HasPasteable;
+
+  FMiCopyHtmlSel.Enabled := FSelection.Active;
+  FMiCopyHtmlScreen.Enabled := FController <> nil;
+  FMiCopyHtmlAll.Enabled := (FController <> nil)
+                        and (FController.Core.HistoryCount + FController.Core.Rows > 0);
 end;
 
 function TTerminalLCLView.GetVirtualLine(AVirtualRow: Integer): TTermCellLine;

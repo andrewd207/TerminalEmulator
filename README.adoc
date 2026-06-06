@@ -35,6 +35,18 @@ toc::[]
 * `YieldRightClickToApp` property (both views): default `False` keeps the
   context menu working even in fullscreen TUIs; set `True` to forward
   right-clicks into a mouse-capturing app.
+* HTML export: `Core.GetHtmlSelection / GetHtmlScreen / GetHtmlAll` (and
+  the lower-level `GetHtmlRange`) produce a self-contained styled
+  document (colors, bold, italic, underline, strike, faint, inverse,
+  hidden, blink, wide cells). Soft-wrapped physical rows are joined into
+  one logical line; trailing blank cells and trailing blank rows are
+  trimmed. Page title comes from the host form. Both views expose three
+  *Copy as HTML* items (Selection / Screen / Everything).
+* Subprocess detection: `Controller.SubProcessRunning` returns `True`
+  when the shell has handed the PTY off to a foreground child (build,
+  editor, REPL). Unix-only; backed by `tcgetpgrp(master_fd)`. Both
+  example apps use it in an `OnCloseQuery` hook to confirm window-close
+  while a command is in flight.
 * No platform-specific paths or hardcoded debug files. Optional tracing
   gated on env vars (see <<debug,Debug>>).
 

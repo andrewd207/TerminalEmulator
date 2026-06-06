@@ -17,6 +17,7 @@ uses
   SysUtils,
   Forms,
   ExtCtrls,
+  Dialogs, Controls,
   Terminal.Controller,
   Terminal.View.LCL;
 
@@ -30,6 +31,7 @@ type
     FCloseTimer: TTimer;
     FCloseCountdown: Integer;
     procedure FormShow(Sender: TObject);
+    procedure FormCloseQuery(Sender: TObject; var CanClose: Boolean);
     procedure FontChanged(Sender: TObject);
     procedure ShellExited(Sender: TObject);
     procedure CloseTickTimer(Sender: TObject);
@@ -110,6 +112,17 @@ begin
   TerminalView.OnFontChanged := @FontChanged;
   TerminalView.OnShellExit := @ShellExited;
   OnShow := @FormShow;
+  OnCloseQuery := @FormCloseQuery;
+end;
+
+procedure TTerminalForm.FormCloseQuery(Sender: TObject; var CanClose: Boolean);
+begin
+  CanClose := True;
+  if (FController <> nil) and FController.SubProcessRunning then
+    CanClose := MessageDlg(
+        'Close window?',
+        'A program is still running in the shell. Quit anyway?',
+        mtConfirmation, [mbYes, mbNo], 0) = mrYes;
 end;
 
 destructor TTerminalForm.Destroy;

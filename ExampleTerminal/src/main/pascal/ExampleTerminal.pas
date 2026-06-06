@@ -17,6 +17,7 @@ uses
   fpg_base,
   fpg_main,
   fpg_form,
+  fpg_dialogs,
   Terminal.Controller,
   Terminal.View.fpGUI;
 
@@ -30,6 +31,7 @@ type
     FCloseTimer: TfpgTimer;
     FCloseCountdown: Integer;
     procedure FormShow(Sender: TObject);
+    procedure FormCloseQuery(Sender: TObject; var CanClose: boolean);
     procedure FontChanged(Sender: TObject);
     procedure ShellExited(Sender: TObject);
     procedure CloseTickTimer(Sender: TObject);
@@ -102,6 +104,18 @@ begin
   TerminalView.OnFontChanged := @FontChanged;
   TerminalView.OnShellExit := @ShellExited;
   OnShow := @FormShow;
+  OnCloseQuery := @FormCloseQuery;
+end;
+
+procedure TTerminalForm.FormCloseQuery(Sender: TObject; var CanClose: boolean);
+begin
+  CanClose := True;
+  if (FController <> nil) and FController.SubProcessRunning then
+    CanClose := TfpgMessageDialog.Question(
+        'Close window?',
+        'A program is still running in the shell. Quit anyway?',
+        [mbYes, mbNo],
+        mbNo) = mbYes;
 end;
 
 destructor TTerminalForm.Destroy;

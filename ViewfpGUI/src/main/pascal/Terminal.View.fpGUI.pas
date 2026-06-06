@@ -58,6 +58,7 @@ type
     function CellSelected(AVirtualRow, ACol: Integer): Boolean;
     procedure ContextMenuItemClick(Sender: TObject);
     procedure ContextPopupShow(Sender: TObject);
+    function SnapshotTitle: string;
     function GetSelectedTextUTF8: RawByteString;
     function GetVirtualLine(AVirtualRow: Integer): TTermCellLine;
     procedure HandleScrollBarScroll(Sender: TObject; position: integer);
@@ -147,6 +148,9 @@ const
   CONTEXT_PASTE = 1;
   CONTEXT_FONT = 2;
   CONTEXT_EMOJI_FONT = 3;
+  CONTEXT_COPY_HTML_SEL = 4;
+  CONTEXT_COPY_HTML_SCREEN = 5;
+  CONTEXT_COPY_HTML_ALL = 6;
 
 
 constructor TTerminalFPGUIView.Create(AOwner: TComponent);
@@ -471,6 +475,10 @@ begin
   FContextMenu.AddSeparator;
   FContextMenu.AddMenuItem('Font', '', @ContextMenuItemClick).Tag:=CONTEXT_FONT;
   FContextMenu.AddMenuItem('Emoji Font', '', @ContextMenuItemClick).Tag:=CONTEXT_EMOJI_FONT;
+  FContextMenu.AddSeparator;
+  FContextMenu.AddMenuItem('Copy Selection as HTML', '', @ContextMenuItemClick).Tag:=CONTEXT_COPY_HTML_SEL;
+  FContextMenu.AddMenuItem('Copy Screen as HTML', '', @ContextMenuItemClick).Tag:=CONTEXT_COPY_HTML_SCREEN;
+  FContextMenu.AddMenuItem('Copy Everything (incl. scrollback) as HTML', '', @ContextMenuItemClick).Tag:=CONTEXT_COPY_HTML_ALL;
   FContextMenu.OnShow:=@ContextPopupShow;
 end;
 
@@ -724,6 +732,15 @@ begin
     CONTEXT_PASTE: DoPaste;
     CONTEXT_FONT: DoChangeFont;
     CONTEXT_EMOJI_FONT: DoChangeEmojiFont;
+    CONTEXT_COPY_HTML_SEL:
+      if (FController <> nil) and FSelection.Active then
+        fpgClipboard.Text := FController.Core.GetHtmlSelection(FSelection, SnapshotTitle);
+    CONTEXT_COPY_HTML_SCREEN:
+      if FController <> nil then
+        fpgClipboard.Text := FController.Core.GetHtmlScreen(SnapshotTitle);
+    CONTEXT_COPY_HTML_ALL:
+      if FController <> nil then
+        fpgClipboard.Text := FController.Core.GetHtmlAll(SnapshotTitle);
   end;
 end;
 
@@ -731,6 +748,15 @@ procedure TTerminalFPGUIView.ContextPopupShow(Sender: TObject);
 begin
   FContextMenu.MenuItemByName('Copy').Enabled:=FSelection.Active;
   FContextMenu.MenuItemByName('Paste').Enabled:=fpgClipboard.Text <> '';
+  FContextMenu.MenuItemByName('Copy Selection as HTML').Enabled:=FSelection.Active;
+end;
+
+function TTerminalFPGUIView.SnapshotTitle: string;
+begin
+  if (Parent <> nil) and (Parent is TTerminalFPGUIForm) then
+    Result := TTerminalFPGUIForm(Parent).WindowTitle
+  else
+    Result := '';
 end;
 
 function TTerminalFPGUIView.GetVirtualLine(AVirtualRow: Integer): TTermCellLine;

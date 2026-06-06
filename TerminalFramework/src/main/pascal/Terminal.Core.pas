@@ -389,6 +389,24 @@ type
     function HistoryCount: Integer;
     function IsUsingAltBuffer: Boolean;
     function GetInSyncUpdate: Boolean;
+    { True when the line at AVirtualRow (history rows first, then screen)
+      ends in a soft wrap — i.e. the next physical row continues the same
+      logical line because the cursor hit the right edge. }
+    function IsLineWrapped(AVirtualRow: Integer): Boolean;
+    { Snapshot terminal content as a styled HTML <pre> block. Honors fg/bg
+      colors, bold/italic/underline/strike, faint, inverse, hidden, blink,
+      and wide-cell layout. Output is self-contained (no external CSS);
+      paste it into anything that accepts HTML and the colors come along.
+
+      Row indices in GetHtmlRange are *virtual*: 0..HistoryCount-1 reach
+      into scrollback, HistoryCount..HistoryCount+Rows-1 cover the screen.
+      Use -1 for AStartCol/AEndCol to select the full row width. }
+    function GetHtmlRange(AStartRow, AEndRow, AStartCol, AEndCol: Integer;
+                          const ATitle: string = ''): RawByteString;
+    function GetHtmlScreen(const ATitle: string = ''): RawByteString;
+    function GetHtmlAll(const ATitle: string = ''): RawByteString;
+    function GetHtmlSelection(const ASelection: TTermSelection;
+                              const ATitle: string = ''): RawByteString;
 
     property Cols: Integer read FCols;
     property Rows: Integer read FRows;
@@ -2461,5 +2479,276 @@ begin
   Result := FSyncDepth > 0;
 end;
 
+function TTerminalCore.IsLineWrapped(AVirtualRow: Integer): Boolean;
+var
+  Hist: Integer;
+  Buf: TTermScreenBuffer;
+  ScreenRow: Integer;
+begin
+  Result := False;
+  Hist := HistoryCount;
+  if AVirtualRow < 0 then Exit;
+  if AVirtualRow < Hist then
+  begin
+    Buf := ActiveBuffer;
+    if (Buf <> nil) and Assigned(Buf.FHistory)
+       and (AVirtualRow < Buf.FHistory.Count) then
+      Result := tlfWrapped in Buf.FHistory[AVirtualRow].Line.Flags;
+    Exit;
+  end;
+  ScreenRow := AVirtualRow - Hist;
+  Buf := ActiveBuffer;
+  if (Buf <> nil) and (ScreenRow >= 0) and (ScreenRow < Buf.FRows) then
+    Result := tlfWrapped in Buf.FLines[ScreenRow].Flags;
+end;
+
+{ --- HTML export helpers ------------------------------------------------ }
+
+procedure HtmlEscapeTo(AStream: TStream; const S: RawByteString);
+var
+  I, RunStart: Integer;
+  Ch: AnsiChar;
+  Esc: RawByteString;
+begin
+  { Stream the bytes in runs: copy unescaped spans verbatim, only break out
+    to write the entity when we actually hit a special char. Avoids the per-
+    byte O(n²) concat the previous implementation did. }
+  RunStart := 1;
+  for I := 1 to Length(S) do
+  begin
+    Ch := S[I];
+    if (Ch = '&') or (Ch = '<') or (Ch = '>') or (Ch = '"') then
+    begin
+      if I > RunStart then
+        AStream.WriteBuffer(S[RunStart], I - RunStart);
+      case Ch of
+        '&': Esc := '&amp;';
+        '<': Esc := '&lt;';
+        '>': Esc := '&gt;';
+        '"': Esc := '&quot;';
+      end;
+      AStream.WriteBuffer(Esc[1], Length(Esc));
+      RunStart := I + 1;
+    end;
+  end;
+  if Length(S) >= RunStart then
+    AStream.WriteBuffer(S[RunStart], Length(S) - RunStart + 1);
+end;
+
+procedure WriteStr(AStream: TStream; const S: RawByteString); inline;
+begin
+  if Length(S) > 0 then
+    AStream.WriteBuffer(S[1], Length(S));
+end;
+
+function HtmlHexColor(ARGB: Cardinal): RawByteString;
+const Hex: array[0..15] of AnsiChar = '0123456789abcdef';
+var R, G, B: Byte;
+begin
+  R := (ARGB shr 16) and $FF;
+  G := (ARGB shr 8)  and $FF;
+  B :=  ARGB         and $FF;
+  SetLength(Result, 7);
+  Result[1] := '#';
+  Result[2] := Hex[R shr 4]; Result[3] := Hex[R and $F];
+  Result[4] := Hex[G shr 4]; Result[5] := Hex[G and $F];
+  Result[6] := Hex[B shr 4]; Result[7] := Hex[B and $F];
+end;
+
+function HtmlDefaultRGB(IsBackground: Boolean): Cardinal;
+begin
+  if IsBackground then Result := $000000 else Result := $D0D0D0;
+end;
+
+function HtmlColorRGB(const AColor: TTermColor; IsBackground: Boolean): Cardinal;
+begin
+  case AColor.Mode of
+    tcmIndexed, tcmRGB: Result := TermColorToRGB(AColor);
+  else
+    Result := HtmlDefaultRGB(IsBackground);
+  end;
+end;
+
+function HtmlSameStyle(const A, B: TTermCell): Boolean;
+const
+  STYLE_BITS = [tafBold, tafItalic, tafUnderline, tafStrike,
+                tafFaint, tafInverse, tafHidden, tafBlink];
+begin
+  Result := (A.FG.Mode = B.FG.Mode)
+        and (A.FG.Index = B.FG.Index)
+        and (A.FG.R = B.FG.R) and (A.FG.G = B.FG.G) and (A.FG.B = B.FG.B)
+        and (A.BG.Mode = B.BG.Mode)
+        and (A.BG.Index = B.BG.Index)
+        and (A.BG.R = B.BG.R) and (A.BG.G = B.BG.G) and (A.BG.B = B.BG.B)
+        and ((A.Attrs * STYLE_BITS) = (B.Attrs * STYLE_BITS));
+end;
+
+function HtmlOpenSpan(const ACell: TTermCell): RawByteString;
+var
+  FG, BG, T: Cardinal;
+  Style, Deco: RawByteString;
+begin
+  FG := HtmlColorRGB(ACell.FG, False);
+  BG := HtmlColorRGB(ACell.BG, True);
+  if tafInverse in ACell.Attrs then
+  begin
+    T := FG; FG := BG; BG := T;
+  end;
+  if tafHidden in ACell.Attrs then FG := BG;
+
+  Style := 'color:' + HtmlHexColor(FG) + ';background:' + HtmlHexColor(BG);
+  if tafFaint in ACell.Attrs then Style := Style + ';opacity:0.5';
+  if tafBlink in ACell.Attrs then Style := Style + ';animation:term-blink 1s steps(2) infinite';
+
+  Deco := '';
+  if tafUnderline in ACell.Attrs then Deco := 'underline';
+  if tafStrike in ACell.Attrs then
+  begin
+    if Deco <> '' then Deco := Deco + ' line-through'
+    else Deco := 'line-through';
+  end;
+  if Deco <> '' then Style := Style + ';text-decoration:' + Deco;
+
+  Result := '<span style="' + Style + '">';
+  if tafBold in ACell.Attrs then Result := Result + '<b>';
+  if tafItalic in ACell.Attrs then Result := Result + '<i>';
+end;
+
+function HtmlCloseSpan(const ACell: TTermCell): RawByteString;
+begin
+  Result := '';
+  if tafItalic in ACell.Attrs then Result := Result + '</i>';
+  if tafBold in ACell.Attrs then Result := Result + '</b>';
+  Result := Result + '</span>';
+end;
+
+function TTerminalCore.GetHtmlRange(AStartRow, AEndRow, AStartCol, AEndCol: Integer;
+                                    const ATitle: string): RawByteString;
+
+  function LineIsBlank(ARowIdx: Integer): Boolean;
+  var
+    L: TTermCellLine;
+    I: Integer;
+  begin
+    if ARowIdx < HistoryCount then L := GetHistoryLine(ARowIdx)
+    else L := GetLine(ARowIdx - HistoryCount);
+    for I := 0 to High(L) do
+      if not L[I].isBlank then Exit(False);
+    Result := True;
+  end;
+
+  function LastNonBlankCol(const L: TTermCellLine): Integer;
+  var I: Integer;
+  begin
+    for I := High(L) downto 0 do
+      if not L[I].isBlank then Exit(I);
+    Result := -1;
+  end;
+
+var
+  TotalRows, R, C, RowStart, RowEnd: Integer;
+  Line: TTermCellLine;
+  Cell, RunCell: TTermCell;
+  HaveRun: Boolean;
+  Text: RawByteString;
+  Stream: TStringStream;
+begin
+  TotalRows := HistoryCount + Rows;
+  AStartRow := Max(0, Min(AStartRow, TotalRows - 1));
+  AEndRow   := Max(0, Min(AEndRow,   TotalRows - 1));
+  if AEndRow < AStartRow then Exit('');
+
+  while (AEndRow > AStartRow) and LineIsBlank(AEndRow) do
+    Dec(AEndRow);
+
+  Stream := TStringStream.Create('');
+  try
+    WriteStr(Stream,
+        '<!DOCTYPE html>'#10
+      + '<html lang="en">'#10
+      + '<head>'#10
+      + '<meta charset="utf-8">'#10
+      + '<title>');
+    if ATitle <> '' then
+      HtmlEscapeTo(Stream, RawByteString(ATitle))
+    else
+      WriteStr(Stream, 'Terminal snapshot');
+    WriteStr(Stream,
+        '</title>'#10
+      + '<style>html,body{margin:0;background:' + HtmlHexColor(HtmlDefaultRGB(True)) + '}</style>'#10
+      + '</head>'#10
+      + '<body>'#10);
+
+    WriteStr(Stream, '<pre style="font-family:monospace;line-height:1.2;margin:0;'
+                   + 'padding:8px;background:' + HtmlHexColor(HtmlDefaultRGB(True))
+                   + ';color:' + HtmlHexColor(HtmlDefaultRGB(False)) + '">');
+
+    for R := AStartRow to AEndRow do
+    begin
+      if R < HistoryCount then Line := GetHistoryLine(R)
+      else Line := GetLine(R - HistoryCount);
+
+      if R = AStartRow then RowStart := Max(0, AStartCol) else RowStart := 0;
+      if R = AEndRow then
+      begin
+        if AEndCol < 0 then RowEnd := High(Line)
+        else RowEnd := Min(AEndCol, High(Line));
+      end
+      else
+        RowEnd := High(Line);
+
+      if not IsLineWrapped(R) then
+        RowEnd := Min(RowEnd, LastNonBlankCol(Line));
+
+      HaveRun := False;
+      if Length(Line) > 0 then
+        for C := RowStart to RowEnd do
+        begin
+          Cell := Line[C];
+          if tafWideTrail in Cell.Attrs then Continue;
+
+          if (not HaveRun) or (not HtmlSameStyle(RunCell, Cell)) then
+          begin
+            if HaveRun then WriteStr(Stream, HtmlCloseSpan(RunCell));
+            WriteStr(Stream, HtmlOpenSpan(Cell));
+            RunCell := Cell;
+            HaveRun := True;
+          end;
+
+          if Cell.Cluster <> '' then Text := Cell.Cluster
+          else Text := ' ';
+          HtmlEscapeTo(Stream, Text);
+        end;
+      if HaveRun then WriteStr(Stream, HtmlCloseSpan(RunCell));
+      if (R < AEndRow) and (not IsLineWrapped(R)) then
+        WriteStr(Stream, #10);
+    end;
+
+    WriteStr(Stream, #10'</pre>'#10'</body>'#10'</html>'#10);
+    Result := Stream.DataString;
+  finally
+    Stream.Free;
+  end;
+end;
+
+function TTerminalCore.GetHtmlScreen(const ATitle: string): RawByteString;
+begin
+  Result := GetHtmlRange(HistoryCount, HistoryCount + Rows - 1, -1, -1, ATitle);
+end;
+
+function TTerminalCore.GetHtmlAll(const ATitle: string): RawByteString;
+begin
+  Result := GetHtmlRange(0, HistoryCount + Rows - 1, -1, -1, ATitle);
+end;
+
+function TTerminalCore.GetHtmlSelection(const ASelection: TTermSelection;
+                                        const ATitle: string): RawByteString;
+var
+  S, E: TTermCellPos;
+begin
+  if not ASelection.Active then Exit('');
+  TermNormalizeSelection(ASelection.Anchor, ASelection.Focus, S, E);
+  Result := GetHtmlRange(S.Row, E.Row, S.Col, E.Col, ATitle);
+end;
 
 end.

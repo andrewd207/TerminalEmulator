@@ -46,6 +46,7 @@ type
     function WriteInput(const AData: RawByteString): Integer; override;
     function Resize(ACols, ARows: Integer): Boolean; override;
     function IsRunning: Boolean; override;
+    function SubProcessRunning: Boolean; override;
 
     property MasterFD: cint read FMasterFD;
     property ChildPID: TPid read FChildPID;
@@ -70,6 +71,9 @@ type
 
 { Import forkpty from libutil }
 function forkpty(var amaster: Integer; name: PChar; termp: PTermios; winp: PWinsize): Integer; cdecl; external 'c' name 'forkpty';
+
+{ Returns the pgid of the PTY's foreground process group, or -1 on error. }
+function tcgetpgrp(fd: cint): TPid; cdecl; external 'c' name 'tcgetpgrp';
 
 
 constructor TTerminalBackendUnix.Create(ACore: TTerminalCore; AParser: TTerminalParser);
@@ -375,6 +379,23 @@ begin
       Stop;
       Result := False;
     end;
+end;
+
+function TTerminalBackendUnix.SubProcessRunning: Boolean;
+var
+  Fg: TPid;
+begin
+  Result := False;
+  if (FMasterFD < 0) or (FChildPID <= 0) then Exit;
+  Fg := tcgetpgrp(FMasterFD);
+  { tcgetpgrp returns the foreground pgid of the controlling tty. The shell
+    itself sits in its own process group whose pgid == FChildPID (it's the
+    session leader after forkpty). A foregrounded child gets a new pgid via
+    setpgid() / job control, so any value other than FChildPID means the
+    shell has handed the terminal off to something it spawned. -1 means we
+    couldn't query (closed fd, kernel error) — treat as "not running". }
+  if Fg > 0 then
+    Result := Fg <> FChildPID;
 end;
 
 initialization

@@ -30,9 +30,9 @@ LOG_DIR := $(STATUS_DIR)/logs
 	lcl-lazbuild summary
 
 all:
+	@rm -rf $(STATUS_DIR)
 	@mkdir -p $(LOG_DIR)
-	@: > $(STATUS_DIR)/failed
-	@: > $(STATUS_DIR)/passed
+	@touch $(STATUS_DIR)/passed $(STATUS_DIR)/failed
 	@$(MAKE) --no-print-directory _run STEP=TerminalFramework      CMD='$(PASBUILD) compile -f $(PROJECT_XML) -m TerminalFramework -p $(PROFILE)'
 	@$(MAKE) --no-print-directory _run STEP=ViewfpGUI              CMD='$(PASBUILD) compile -f $(PROJECT_XML) -m ViewfpGUI -p $(PROFILE)'
 	@$(MAKE) --no-print-directory _run STEP=ViewLCL                CMD='$(PASBUILD) compile -f $(PROJECT_XML) -m ViewLCL -p $(PROFILE)'

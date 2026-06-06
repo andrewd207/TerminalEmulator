@@ -45,6 +45,11 @@ type
     procedure SendArrowDown(Ctrl: Boolean);
     procedure SendArrowLeft(Ctrl: Boolean);
     procedure SendArrowRight(Ctrl: Boolean);
+    { True when the shell has spawned a foreground child (e.g. `vim`, a
+      build, a long-running command). False at an idle shell prompt or
+      before the shell starts. Backend-dependent: ConPTY/Windows can't
+      currently distinguish, and reports False. }
+    function SubProcessRunning: Boolean;
 
     property Core: TTerminalCore read FCore;
     property Parser: TTerminalParser read FParser;
@@ -179,6 +184,11 @@ begin
     SendInput(#27'[1;5C')
   else
     SendInput(#27'[C');
+end;
+
+function TTerminalController.SubProcessRunning: Boolean;
+begin
+  Result := (FBackend <> nil) and FBackend.SubProcessRunning;
 end;
 
 end.
