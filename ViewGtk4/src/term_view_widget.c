@@ -372,11 +372,16 @@ static void term_view_widget_measure(GtkWidget *widget, GtkOrientation orient,
 }
 
 static void term_view_widget_size_allocate(GtkWidget *widget,
-                                           int width, int height,
+                                           int width G_GNUC_UNUSED,
+                                           int height G_GNUC_UNUSED,
                                            int baseline G_GNUC_UNUSED) {
     TermViewWidget *self = TERM_VIEW_WIDGET(widget);
     send_resize_to_tv(self);
-    if (self->popover) gtk_popover_present(GTK_POPOVER(self->popover));
+    /* If the popover is open during a resize, GTK will reposition it for us;
+       calling gtk_popover_present from here when it isn't visible triggers
+       "Broken accounting of active state" warnings. */
+    if (self->popover && gtk_widget_get_visible(self->popover))
+        gtk_popover_present(GTK_POPOVER(self->popover));
     update_adjustment(self);
 }
 
