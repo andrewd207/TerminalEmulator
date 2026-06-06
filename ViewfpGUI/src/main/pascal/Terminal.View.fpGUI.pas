@@ -24,6 +24,7 @@ type
     FCursorTimer: TfpgTimer;
     FCursorStyle: TCursorStyle;
     FFontDesc: string;
+    FEmojiFontDesc: string;
     FCharWidth: Integer;
     FCharHeight: Integer;
     FTopRow: Integer;
@@ -52,7 +53,7 @@ type
     function CellRect(ACol, ARow: Integer): TfpgRect;
     function MapColor(const AColor: TTermColor; IsBackground: Boolean): TfpgColor;
     function CellText(const ACell: TTermCell): Utf8String;
-    function PickFont(const AAttrs: TTermAttrFlags): TfpgFontResourceBase;
+    function PickFont(const AAttrs: TTermAttrFlags; ACodePoint: Cardinal): TfpgFontResourceBase;
     procedure PaintCell(const ACanvas: TfpgCanvas; ACol, AViewRow: Integer; const ACell: TTermCell; AHasCursor: Boolean); inline;
     function PixelToCell(X, Y: Integer): TTermCellPos;
     procedure UpdateScrollBarCoords;
@@ -61,6 +62,7 @@ type
     procedure DoCopy;
     procedure DoPaste;
     procedure DoChangeFont;
+    procedure DoChangeEmojiFont;
   protected
     procedure HandlePaint; override;
     procedure HandleResize(AWidth, AHeight: TfpgCoord); override;
@@ -82,6 +84,7 @@ type
 
     property Controller: TTerminalController read FController;
     property FontDesc: string read FFontDesc write FFontDesc;
+    property EmojiFontDesc: string read FEmojiFontDesc write FEmojiFontDesc;
     property CursorStyle: TCursorStyle read FCursorStyle write FCursorStyle;
     property OnFontChanged: TNotifyEvent read FOnFontChanged write FOnFontChanged;
   end;
@@ -107,6 +110,7 @@ const
   CONTEXT_COPY = 0;
   CONTEXT_PASTE = 1;
   CONTEXT_FONT = 2;
+  CONTEXT_EMOJI_FONT = 3;
 
 
 constructor TTerminalFPGUIView.Create(AOwner: TComponent);
@@ -355,6 +359,7 @@ begin
   FContextMenu.AddMenuItem('Paste', 'Shift+Ins', @ContextMenuItemClick).Tag:=CONTEXT_PASTE;
   FContextMenu.AddSeparator;
   FContextMenu.AddMenuItem('Font', '', @ContextMenuItemClick).Tag:=CONTEXT_FONT;
+  FContextMenu.AddMenuItem('Emoji Font', '', @ContextMenuItemClick).Tag:=CONTEXT_EMOJI_FONT;
   FContextMenu.OnShow:=@ContextPopupShow;
 end;
 
@@ -395,6 +400,20 @@ begin
   end;
   UpdateMetrics;
   SyncSizeToController;
+end;
+
+procedure TTerminalFPGUIView.DoChangeEmojiFont;
+var
+  S: String;
+begin
+  S := FEmojiFontDesc;
+  if SelectFontDialog(S, '') then
+  begin
+    FEmojiFontDesc := S;
+    if Assigned(FOnFontChanged) then
+      FOnFontChanged(Self);
+    Repaint;
+  end;
 end;
 
 procedure TTerminalFPGUIView.SyncSizeToController;
@@ -447,10 +466,24 @@ begin
   end;
 end;
 
-function TTerminalFPGUIView.PickFont(const AAttrs: TTermAttrFlags): TfpgFontResourceBase;
+function IsEmojiCodePoint(CP: Cardinal): Boolean; inline;
+begin
+  Result :=
+    ((CP >= $2600)  and (CP <= $27BF))  or  // misc symbols + dingbats
+    ((CP >= $1F300) and (CP <= $1F6FF)) or  // pictographs/transport
+    ((CP >= $1F900) and (CP <= $1F9FF)) or  // supplemental symbols/emoji
+    ((CP >= $1FA70) and (CP <= $1FAFF));    // symbols & pictographs ext-A
+end;
+
+function TTerminalFPGUIView.PickFont(const AAttrs: TTermAttrFlags; ACodePoint: Cardinal): TfpgFontResourceBase;
 var
   Desc: string;
 begin
+  if (FEmojiFontDesc <> '') and IsEmojiCodePoint(ACodePoint) then
+  begin
+    Result := fpgApplication.FontManager.GetFont(FEmojiFontDesc);
+    if Result <> nil then Exit;
+  end;
   Desc := FFontDesc;
   if tafBold in AAttrs then Desc := Desc + ':bold';
   if tafItalic in AAttrs then Desc := Desc + ':italic';
@@ -512,23 +545,23 @@ begin
   ACanvas.Color := BG;
   ACanvas.FillRectangle(R);
 
-  if ACell.isBlank then
-    Exit;
-
-  // Blink: hide glyph during off phase. Reuse the cursor blink toggle.
+  // Blink: hide glyph (and decorations) during off phase.
   if (tafBlink in ACell.Attrs) and (not FCursorBlinkVisible) then
     Exit;
 
-  S := CellText(ACell);
-  ACanvas.SetFont(PickFont(ACell.Attrs));
-  ACanvas.TextColor := FG;
-  ACanvas.DrawString(R.Left, R.Top, S);
+  if not ACell.isBlank then
+  begin
+    S := CellText(ACell);
+    ACanvas.SetFont(PickFont(ACell.Attrs, ACell.CodePoint));
+    ACanvas.TextColor := FG;
+    ACanvas.DrawString(R.Left, R.Top, S);
+  end;
 
   if (tafUnderline in ACell.Attrs) or (tafStrike in ACell.Attrs) then
   begin
     ACanvas.Color := FG;
     if tafUnderline in ACell.Attrs then
-      ACanvas.DrawLine(R.Left, R.Bottom - 1, R.Right, R.Bottom - 1);
+      ACanvas.DrawLine(R.Left, R.Bottom, R.Right, R.Bottom);
     if tafStrike in ACell.Attrs then
       ACanvas.DrawLine(R.Left, R.Top + R.Height div 2,
                        R.Right, R.Top + R.Height div 2);
@@ -579,6 +612,7 @@ begin
     CONTEXT_COPY: DoCopy;
     CONTEXT_PASTE: DoPaste;
     CONTEXT_FONT: DoChangeFont;
+    CONTEXT_EMOJI_FONT: DoChangeEmojiFont;
   end;
 end;
 

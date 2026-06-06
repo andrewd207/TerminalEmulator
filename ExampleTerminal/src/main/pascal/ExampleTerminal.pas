@@ -50,6 +50,13 @@ begin
       if S <> '' then
         TerminalView.FontDesc := S;
     end;
+    if not Eof(F) then
+    begin
+      ReadLn(F, S);
+      S := Trim(S);
+      if S <> '' then
+        TerminalView.EmojiFontDesc := S;
+    end;
   finally
     CloseFile(F);
   end;
@@ -66,6 +73,7 @@ begin
   try
     Rewrite(F);
     WriteLn(F, TerminalView.FontDesc);
+    WriteLn(F, TerminalView.EmojiFontDesc);
   finally
     CloseFile(F);
   end;
