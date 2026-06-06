@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CONFIG>
+  <Package Version="5">
+    <Name Value="ViewfpGUI"/>
+    <CompilerOptions>
+      <Version Value="11"/>
+      <SearchPaths>
+        <IncludeFiles Value="target"/>
+        <OtherUnitFiles Value="/home/andrew/.pasbuild/repository/fpgui-framework/2.1.0/x86_64-linux-3.3.1/units/;/home/andrew/.pasbuild/repository/fpgui-svg2hvif/2.1.0/x86_64-linux-3.3.1/units/;../TerminalFramework/target/units;src/main/pascal;target/units"/>
+        <UnitOutputDirectory Value="target/units"/>
+      </SearchPaths>
+    </CompilerOptions>
+    <Version Major="1"/>
+    <Files>
+      <Item>
+        <Filename Value="src/main/pascal/Terminal.View.fpGUI.pas"/>
+        <UnitName Value="Terminal.View.fpGUI"/>
+      </Item>
+    </Files>
+    <RequiredPkgs>
+      <Item>
+        <PackageName Value="fpgui_framework"/>
+      </Item>
+      <Item>
+        <PackageName Value="FCL"/>
+      </Item>
+      <Item>
+        <PackageName Value="TerminalFramework"/>
+      </Item>
+    </RequiredPkgs>
+    <UsageOptions>
+      <UnitPath Value="$(PkgOutDir)"/>
+    </UsageOptions>
+    <PublishOptions>
+      <Version Value="2"/>
+      <UseFileFilters Value="True"/>
+    </PublishOptions>
+  </Package>
+</CONFIG>

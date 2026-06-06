@@ -168,6 +168,8 @@ type
 
   { TTermScreenBuffer }
 
+  TTermBufferAnchor = (abBottom, abTop);
+
   TTermScreenBuffer = class
   private
     FCols: Integer;
@@ -176,6 +178,7 @@ type
     FLines: TTermLines;
     FHistory: TTermHistoryRing;
     FBlankCell: TTermCell;
+    FAnchor: TTermBufferAnchor;
     function GetHistoryCount: Integer;
     procedure RecreateHistory;
     procedure SetSizeInternal(ACols: Integer; ARows: Integer; Preserve: Boolean);
@@ -199,6 +202,7 @@ type
     property ScrollbackLimit: Integer read FScrollbackLimit write FScrollbackLimit;
     property HistoryCount: Integer read GetHistoryCount;
     property BlankCell: TTermCell read FBlankCell write SetBlankCell;
+    property Anchor: TTermBufferAnchor read FAnchor write FAnchor;
   end;
 
   TTerminalCore = class
@@ -208,7 +212,7 @@ type
     FAltBuffer: TTermScreenBuffer;
     FUseAltBuffer: Boolean;
     FCursor: TTermCursor;
-    FSavedCursor: TTermCursor;
+    FSavedCursors: array[Boolean] of TTermCursor; // indexed by FUseAltBuffer
     FPen: TTermPen;
     FDefaultPen: TTermPen;
     FCols: Integer;
@@ -223,11 +227,22 @@ type
     FOnBell: TTerminalBellEvent;
     FOnTitle: TTerminalTitleEvent;
     FOnWrite: TTerminalWriteEvent;
+    FSyncDepth: Integer;
+    FSyncDirty: TTermRect;
+    FSyncDirtyValid: Boolean;
+    FSyncStartTick: QWord;
+    { Debug ring of recent ops, dumped on the U+2502-bottom-rows trap. }
+    FDbgRing: array[0..255] of string;
+    FDbgRingHead: Integer;
+    FDbgCounter: Integer;
+    FTrapTail: string;
+    FTrapFired: Boolean;
     function ActiveBuffer: TTermScreenBuffer;
     function MakeBlankCell: TTermCell;
     procedure ClampCursor;
     procedure MarkAllDirty;
     procedure InvalidateRect(ALeft, ATop, ARight, ABottom: Integer);
+    procedure EmitInvalidate(const R: TTermRect);
     procedure SetBracketedPasteMode(AValue: Boolean);
     procedure SetTabStopDefaults;
     procedure InternalLineFeed(WithCarriageReturn: Boolean);
@@ -246,6 +261,11 @@ type
     procedure SwitchToMainBuffer;
     procedure SwitchToAltBuffer(AClear: Boolean = True);
     procedure ClearAltBuffer;
+    procedure BeginSyncUpdate;
+    procedure EndSyncUpdate;
+    procedure CheckSyncTimeout;
+    procedure DbgRecord(const ALine: string);
+    procedure DbgDump;
 
     procedure SetCursorPos(ACol, ARow: Integer);
     procedure MoveCursor(ADeltaCol, ADeltaRow: Integer);
@@ -315,10 +335,13 @@ type
     function GetHistoryLine(AIndex: Integer): TTermCellLine;
     function HistoryCount: Integer;
     function IsUsingAltBuffer: Boolean;
+    function GetInSyncUpdate: Boolean;
 
     property Cols: Integer read FCols;
     property Rows: Integer read FRows;
     property Cursor: TTermCursor read FCursor;
+    property InSyncUpdate: Boolean read GetInSyncUpdate;
+    property InAltBuffer: Boolean read FUseAltBuffer;
     property BracketedPasteMode: Boolean read FBracketedPasteMode write SetBracketedPasteMode;
     property OnInvalidate: TTerminalInvalidateEvent read FOnInvalidate write FOnInvalidate;
     property OnBell: TTerminalBellEvent read FOnBell write FOnBell;
@@ -644,6 +667,7 @@ begin
   FCols := 0;
   FRows := 0;
   FScrollbackLimit := AScrollbackLimit;
+  FAnchor := abBottom;
   RecreateHistory;
   InitBlankCell;
   SetSizeInternal(ACols, ARows, False);
@@ -696,7 +720,6 @@ var
   OldStart: Integer;
   NewStart: Integer;
   I: Integer;
-  AllBlank: Boolean;
 begin
   if ACols < 1 then ACols := 1;
   if ARows < 1 then ARows := 1;
@@ -711,35 +734,17 @@ begin
     Exit;
   end;
 
-  { Fast path: only the row count changes and columns are the same. }
-  if ACols = FCols then
+  if (ACols = FCols) and (ARows = FRows) then
+    Exit;
+
+  { Fast path: same width, grow rows — just append blank rows at the bottom. }
+  if (ACols = FCols) and (ARows > FRows) and (FAnchor = abTop) then
   begin
-    if ARows > FRows then
-    begin
-      SetLength(FLines, ARows);
-      for I := FRows to ARows - 1 do
-        FLines[I].Init(FCols, FBlankCell);
-      FRows := ARows;
-      Exit;
-    end
-    else if ARows < FRows then
-    begin
-      AllBlank := True;
-      for I := ARows to FRows - 1 do
-        if FLines[I].Cells.UsedLength > 0 then
-        begin
-          AllBlank := False;
-          Break;
-        end;
-      if AllBlank then
-      begin
-        SetLength(FLines, ARows);
-        FRows := ARows;
-        Exit;
-      end;
-    end
-    else
-      Exit; { same size — nothing to do }
+    SetLength(FLines, ARows);
+    for I := FRows to ARows - 1 do
+      FLines[I].Init(FCols, FBlankCell);
+    FRows := ARows;
+    Exit;
   end;
 
   OldLines := FLines;
@@ -753,8 +758,26 @@ begin
   else
     CopyRows := ARows;
 
-  OldStart := Length(OldLines) - CopyRows;
-  NewStart := 0;
+  case FAnchor of
+    abBottom:
+      begin
+        { Preserve the bottom rows of the old buffer; place them at the bottom
+          of the new buffer.  On shrink, the top rows are dropped (typical
+          shell behaviour: keep the prompt/cursor at the bottom).  On grow,
+          blank rows are added above the old content. }
+        OldStart := Length(OldLines) - CopyRows;
+        NewStart := ARows - CopyRows;
+      end;
+    abTop:
+      begin
+        { Preserve the top rows of the old buffer; place them at the top of
+          the new buffer.  On shrink, the bottom rows are dropped (right for
+          full-screen TUI apps that draw top-down).  On grow, blank rows are
+          added below the old content. }
+        OldStart := 0;
+        NewStart := 0;
+      end;
+  end;
 
   for I := 0 to CopyRows - 1 do
     NewLines[NewStart + I] := OldLines[OldStart + I].MakeResizedCopy(ACols, FBlankCell);
@@ -790,13 +813,13 @@ procedure TTermScreenBuffer.AppendHistory(const ALine: TTermLine);
 var
   CopyLine: TTermLine;
 begin
+  if FScrollbackLimit <= 0 then Exit;
   if not Assigned(FHistory) then
     RecreateHistory;
+  if not Assigned(FHistory) then Exit;
 
   CopyLine := ALine.MakeResizedCopy(FCols, FBlankCell);
   FHistory.Push(TTermHistoryLine.Create(CopyLine));
-  WriteLn('Added to history: ', CopyLine.AsPlainText);
-
 end;
 
 procedure TTermScreenBuffer.ScrollUp(ATopRow, ABottomRow, ACount: Integer);
@@ -882,6 +905,7 @@ begin
 
   FMainBuffer := TTermScreenBuffer.Create(ACols, ARows, AScrollbackLimit);
   FAltBuffer  := TTermScreenBuffer.Create(ACols, ARows, 0);
+  FAltBuffer.Anchor := abTop;
   FUseAltBuffer := False;
 
   SetLength(FTabStops, FCols);
@@ -938,9 +962,6 @@ procedure TTerminalCore.InvalidateRect(ALeft, ATop, ARight, ABottom: Integer);
 var
   R: TTermRect;
 begin
-  if not Assigned(FOnInvalidate) then
-    Exit;
-
   if ALeft < 0 then ALeft := 0;
   if ATop < 0 then ATop := 0;
   if ARight >= FCols then ARight := FCols - 1;
@@ -952,12 +973,108 @@ begin
   R.Top := ATop;
   R.Right := ARight;
   R.Bottom := ABottom;
-  FOnInvalidate(Self, R);
+  EmitInvalidate(R);
+end;
+
+procedure TTerminalCore.EmitInvalidate(const R: TTermRect);
+begin
+  if FSyncDepth > 0 then
+  begin
+    { Accumulate dirty rects into a single bounding rectangle.  Flushed
+      on EndSyncUpdate so the view paints the whole frame in one go. }
+    if not FSyncDirtyValid then
+    begin
+      FSyncDirty := R;
+      FSyncDirtyValid := True;
+    end
+    else
+    begin
+      if R.Left   < FSyncDirty.Left   then FSyncDirty.Left   := R.Left;
+      if R.Top    < FSyncDirty.Top    then FSyncDirty.Top    := R.Top;
+      if R.Right  > FSyncDirty.Right  then FSyncDirty.Right  := R.Right;
+      if R.Bottom > FSyncDirty.Bottom then FSyncDirty.Bottom := R.Bottom;
+    end;
+    Exit;
+  end;
+
+  if Assigned(FOnInvalidate) then
+    FOnInvalidate(Self, R);
+end;
+
+procedure TTerminalCore.BeginSyncUpdate;
+begin
+  if FSyncDepth = 0 then
+    FSyncStartTick := GetTickCount64;
+  Inc(FSyncDepth);
+  DbgRecord(Format('BSU depth=%d', [FSyncDepth]));
+end;
+
+procedure TTerminalCore.EndSyncUpdate;
+var
+  R: TTermRect;
+begin
+  if FSyncDepth = 0 then begin DbgRecord('ESU at depth=0 (ignored)'); Exit; end;
+  Dec(FSyncDepth);
+  DbgRecord(Format('ESU depth=%d', [FSyncDepth]));
+  if FSyncDepth > 0 then Exit;
+  if FSyncDirtyValid and Assigned(FOnInvalidate) then
+  begin
+    R := FSyncDirty;
+    FSyncDirtyValid := False;
+    FOnInvalidate(Self, R);
+  end
+  else
+    FSyncDirtyValid := False;
+end;
+
+procedure TTerminalCore.CheckSyncTimeout;
+const
+  SyncTimeoutMs = 150;
+begin
+  if FSyncDepth = 0 then Exit;
+  if GetTickCount64 - FSyncStartTick < SyncTimeoutMs then Exit;
+  { Force-end an apparently stuck synchronized update.  The unbalanced 2026l
+    that a well-behaved app would send is treated as having arrived here. }
+  FSyncDepth := 0;
+  if FSyncDirtyValid and Assigned(FOnInvalidate) then
+    FOnInvalidate(Self, FSyncDirty);
+  FSyncDirtyValid := False;
 end;
 
 procedure TTerminalCore.SetBracketedPasteMode(AValue: Boolean);
 begin
   FBracketedPasteMode := AValue;
+end;
+
+procedure TTerminalCore.DbgRecord(const ALine: string);
+var F: TextFile;
+begin
+  FDbgRing[FDbgRingHead] := ALine;
+  FDbgRingHead := (FDbgRingHead + 1) and 255;
+  Inc(FDbgCounter);
+  try
+    AssignFile(F, '/tmp/term-trace.log');
+    if FileExists('/tmp/term-trace.log') then Append(F) else Rewrite(F);
+    WriteLn(F, '[', FDbgCounter, '] ', ALine);
+    CloseFile(F);
+  except
+    on E: Exception do
+      WriteLn(StdErr, '[dbg-fail #', FDbgCounter, '] ', E.Message);
+  end;
+end;
+
+procedure TTerminalCore.DbgDump;
+var
+  I, Idx: Integer;
+begin
+  WriteLn('=== DBG RING (oldest -> newest) ===');
+  for I := 0 to 255 do
+  begin
+    Idx := (FDbgRingHead + I) and 255;
+    if FDbgRing[Idx] <> '' then
+      WriteLn(FDbgRing[Idx]);
+  end;
+  WriteLn('=== END DBG RING ===');
 end;
 
 procedure TTerminalCore.SetTabStopDefaults;
@@ -972,16 +1089,25 @@ begin
 end;
 
 procedure TTerminalCore.InternalLineFeed(WithCarriageReturn: Boolean);
+var OldRow: Integer;
 begin
+  OldRow := FCursor.Row;
   if WithCarriageReturn then
     FCursor.Col := 0;
 
   FCursor.PendingWrap := False;
 
   if FCursor.Row = FBottomMargin then
-    ActiveBuffer.ScrollUp(FTopMargin, FBottomMargin, 1)
+  begin
+    ActiveBuffer.ScrollUp(FTopMargin, FBottomMargin, 1);
+    DbgRecord(Format('LF SCROLL r=%d (top=%d bot=%d alt=%d)',
+      [OldRow, FTopMargin, FBottomMargin, Integer(Byte(FUseAltBuffer))]));
+  end
   else if FCursor.Row < FRows - 1 then
+  begin
     Inc(FCursor.Row);
+    DbgRecord(Format('LF ADV %d -> %d', [OldRow, FCursor.Row]));
+  end;
 
   InvalidateRect(0, FTopMargin, FCols - 1, FBottomMargin);
 end;
@@ -1005,6 +1131,10 @@ begin
   if Cell <> nil then
     Cell^ := ACell;
 
+  if (ACell.CodePoint >= 32) and (ACell.CodePoint < 127) then
+    DbgRecord(Format('PUT alt=%d r=%d c=%d ch=%s',
+      [Integer(Byte(FUseAltBuffer)), FCursor.Row, FCursor.Col, Chr(ACell.CodePoint)]));
+
   InvalidateRect(FCursor.Col, FCursor.Row, FCols - 1, FCursor.Row);
 
   if not AdvanceCursor then
@@ -1012,7 +1142,7 @@ begin
 
   if FCursor.Col = FCols - 1 then
   begin
-    if FAutoWrap then
+    if FAutoWrap and not FUseAltBuffer then
       FCursor.PendingWrap := True;
     { don't advance — wrap fires on the next printable character }
   end
@@ -1083,7 +1213,8 @@ begin
   FCursor.Row := 0;
   FCursor.Visible := True;
   FCursor.PendingWrap := False;
-  FSavedCursor := FCursor;
+  FSavedCursors[False] := FCursor;
+  FSavedCursors[True]  := FCursor;
 
   FTopMargin := 0;
   FBottomMargin := FRows - 1;
@@ -1128,7 +1259,6 @@ begin
   if not FUseAltBuffer then
     Exit;
   FUseAltBuffer := False;
-  ClampCursor;
   MarkAllDirty;
 end;
 
@@ -1137,7 +1267,6 @@ begin
   FUseAltBuffer := True;
   if AClear then
     FAltBuffer.Clear;
-  ClampCursor;
   MarkAllDirty;
 end;
 
@@ -1161,6 +1290,8 @@ begin
 
   FCursor.PendingWrap := False;
   ClampCursor;
+  DbgRecord(Format('CUP req(c=%d,r=%d) -> (c=%d,r=%d)',
+    [ACol, ARow, FCursor.Col, FCursor.Row]));
 end;
 
 procedure TTerminalCore.MoveCursor(ADeltaCol, ADeltaRow: Integer);
@@ -1173,14 +1304,18 @@ end;
 
 procedure TTerminalCore.SaveCursor;
 begin
-  FSavedCursor := FCursor;
+  FSavedCursors[FUseAltBuffer] := FCursor;
+  DbgRecord(Format('SC saved (c=%d,r=%d) alt=%d',
+    [FCursor.Col, FCursor.Row, Integer(Byte(FUseAltBuffer))]));
 end;
 
 procedure TTerminalCore.RestoreCursor;
 begin
-  FCursor := FSavedCursor;
+  FCursor := FSavedCursors[FUseAltBuffer];
   FCursor.PendingWrap := False;
   ClampCursor;
+  DbgRecord(Format('RC restored to (c=%d,r=%d) alt=%d',
+    [FCursor.Col, FCursor.Row, Integer(Byte(FUseAltBuffer))]));
 end;
 
 procedure TTerminalCore.CursorHome;
@@ -1194,30 +1329,40 @@ begin
     FCursor.PendingWrap := False;
     ClampCursor;
   end;
+  DbgRecord('HOME');
 end;
 
 procedure TTerminalCore.CursorUp(ACount: Integer);
+var Old: Integer;
 begin
   if ACount < 1 then ACount := 1;
+  Old := FCursor.Row;
   Dec(FCursor.Row, ACount);
   FCursor.PendingWrap := False;
   ClampCursor;
+  DbgRecord(Format('CUU n=%d %d->%d', [ACount, Old, FCursor.Row]));
 end;
 
 procedure TTerminalCore.CursorDown(ACount: Integer);
+var Old: Integer;
 begin
   if ACount < 1 then ACount := 1;
+  Old := FCursor.Row;
   Inc(FCursor.Row, ACount);
   FCursor.PendingWrap := False;
   ClampCursor;
+  DbgRecord(Format('CUD n=%d  r=%d -> r=%d', [ACount, Old, FCursor.Row]));
 end;
 
 procedure TTerminalCore.CursorForward(ACount: Integer);
+var Old: Integer;
 begin
   if ACount < 1 then ACount := 1;
+  Old := FCursor.Col;
   Inc(FCursor.Col, ACount);
   FCursor.PendingWrap := False;
   ClampCursor;
+  DbgRecord(Format('CUF n=%d %d->%d r=%d', [ACount, Old, FCursor.Col, FCursor.Row]));
 end;
 
 procedure TTerminalCore.CursorBackward(ACount: Integer);
@@ -1258,6 +1403,7 @@ begin
 
   FTopMargin := ATopRow;
   FBottomMargin := ABottomRow;
+  DbgRecord(Format('DECSTBM top=%d bot=%d (rows=%d)', [ATopRow, ABottomRow, FRows]));
   CursorHome;
 end;
 
@@ -1269,15 +1415,28 @@ begin
 end;
 
 procedure TTerminalCore.ScrollUp(ACount: Integer);
+var
+  Before, After: string;
+  C: PTermCell;
 begin
   if ACount < 1 then ACount := 1;
+  Before := '';
+  C := ActiveBuffer.CellAt(2, 8);
+  if C <> nil then Before := C^.Cluster;
+  DbgRecord(Format('SU n=%d (top=%d bot=%d) row8col2-before="%s"',
+    [ACount, FTopMargin, FBottomMargin, Before]));
   ActiveBuffer.ScrollUp(FTopMargin, FBottomMargin, ACount);
+  After := '';
+  C := ActiveBuffer.CellAt(2, 8);
+  if C <> nil then After := C^.Cluster;
+  DbgRecord(Format('SU AFTER row8col2="%s"', [After]));
   InvalidateRect(0, FTopMargin, FCols - 1, FBottomMargin);
 end;
 
 procedure TTerminalCore.ScrollDown(ACount: Integer);
 begin
   if ACount < 1 then ACount := 1;
+  DbgRecord(Format('SD n=%d (top=%d bot=%d)', [ACount, FTopMargin, FBottomMargin]));
   ActiveBuffer.ScrollDown(FTopMargin, FBottomMargin, ACount);
   InvalidateRect(0, FTopMargin, FCols - 1, FBottomMargin);
 end;
@@ -1438,6 +1597,7 @@ procedure TTerminalCore.CarriageReturn;
 begin
   FCursor.Col := 0;
   FCursor.PendingWrap := False;
+  DbgRecord(Format('CR r=%d', [FCursor.Row]));
 end;
 
 procedure TTerminalCore.LineFeed;
@@ -1517,7 +1677,9 @@ var
   BaseCell, Trail: PTermCell;
   BaseCol, BaseRow: Integer;
   N: Integer;
+  EntryRow: Integer;
 begin
+  EntryRow := FCursor.Row;
   Width := CodePointCellWidth(ACodePoint, False);
 
   if Width = 0 then
@@ -1547,11 +1709,18 @@ begin
     if ActiveBuffer.InBounds(0, FCursor.Row) then
       Include(ActiveBuffer.FLines[FCursor.Row].Flags, tlfWrapped);
     if FCursor.Row = FBottomMargin then
-      ActiveBuffer.ScrollUp(FTopMargin, FBottomMargin, 1)
-    else if FCursor.Row < FRows - 1 then
-      Inc(FCursor.Row);
-    FCursor.Col := 0;
-    InvalidateRect(0, FTopMargin, FCols - 1, FBottomMargin);
+    begin
+      ActiveBuffer.ScrollUp(FTopMargin, FBottomMargin, 1);
+      FCursor.Col := 0;
+      InvalidateRect(0, FTopMargin, FCols - 1, FBottomMargin);
+    end
+    else
+    begin
+      if FCursor.Row < FRows - 1 then
+        Inc(FCursor.Row);
+      FCursor.Col := 0;
+      InvalidateRect(0, FTopMargin, FCols - 1, FBottomMargin);
+    end;
   end;
 
   if Width = 2 then
@@ -1581,8 +1750,8 @@ begin
   Cell := MakeBlankCell;
   Cell.CodePoint := ACodePoint;
   Cell.Cluster := EncodeUTF8CodePoint(ACodePoint);
-  if Length(Cell.Cluster) > 1 then
-    WriteLn(Format('U+%04X %s', [ACodePoint, EncodeUTF8CodePoint(ACodePoint)]));
+  //if Length(Cell.Cluster) > 1 then
+  //  WriteLn(Format('U+%04X %s', [ACodePoint, EncodeUTF8CodePoint(ACodePoint)]));
   SetLength(Cell.Combining, 0);
 
   Exclude(Cell.Attrs, tafWideLead);
@@ -1593,13 +1762,11 @@ begin
     Include(Cell.Attrs, tafWideLead);
 
   if Width = 1 then
+    PutCellAtCursor(Cell, True)
+  else
   begin
-    PutCellAtCursor(Cell, True);
-    Exit;
-  end;
 
   PutCellAtCursor(Cell, False);
-
   Trail := ActiveBuffer.CellAt(FCursor.Col + 1, FCursor.Row);
   if Trail <> nil then
   begin
@@ -1621,9 +1788,11 @@ begin
   begin
     { wide char occupied the last two columns; next char must wrap first }
     FCursor.Col := FCols - 1;
-    if FAutoWrap then
+    if FAutoWrap and not FUseAltBuffer then
       FCursor.PendingWrap := True;
   end;
+  end;
+
 end;
 
 procedure TTerminalCore.WriteUTF8(const AUTF8: RawByteString);
@@ -1784,6 +1953,11 @@ end;
 function TTerminalCore.IsUsingAltBuffer: Boolean;
 begin
   Result := FUseAltBuffer;
+end;
+
+function TTerminalCore.GetInSyncUpdate: Boolean;
+begin
+  Result := FSyncDepth > 0;
 end;
 
 

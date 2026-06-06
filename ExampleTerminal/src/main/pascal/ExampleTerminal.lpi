@@ -28,7 +28,7 @@
         <PackageName Value="TerminalFramework"/>
       </Item>
       <Item>
-        <PackageName Value="fpgui_framework"/>
+        <PackageName Value="ViewfpGUI"/>
       </Item>
     </RequiredPackages>
     <Units>

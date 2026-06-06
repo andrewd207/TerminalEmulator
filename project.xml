@@ -10,8 +10,9 @@
   </build>
 
   <modules>
-    <module>ExampleTerminal</module>
     <module>TerminalFramework</module>
+    <module>ViewfpGUI</module>
+    <module>ExampleTerminal</module>
   </modules>
 
 <profiles>
@@ -24,6 +25,7 @@
         <option>-gw</option>
         <option>-gl</option>
         <option>-O-</option>
+        <option>-Criot</option>
       </compilerOptions>
     </profile>
 </profiles>

@@ -235,6 +235,38 @@ begin
   FActive := False;
 end;
 
+procedure DumpRawBytes(const AData: RawByteString);
+var
+  F: TextFile;
+  I: Integer;
+  HexLine, AsciiLine: string;
+  B: Byte;
+begin
+  AssignFile(F, '/tmp/term-raw.log');
+  if FileExists('/tmp/term-raw.log') then Append(F) else Rewrite(F);
+  HexLine := '';
+  AsciiLine := '';
+  for I := 1 to Length(AData) do
+  begin
+    B := Byte(AData[I]);
+    HexLine := HexLine + IntToHex(B, 2) + ' ';
+    if (B >= 32) and (B < 127) then
+      AsciiLine := AsciiLine + Chr(B)
+    else if B = $1B then
+      AsciiLine := AsciiLine + '<ESC>'
+    else if B = $0A then
+      AsciiLine := AsciiLine + '<LF>'
+    else if B = $0D then
+      AsciiLine := AsciiLine + '<CR>'
+    else
+      AsciiLine := AsciiLine + '.';
+  end;
+  WriteLn(F, '--- chunk len=', Length(AData), ' ---');
+  WriteLn(F, HexLine);
+  WriteLn(F, AsciiLine);
+  CloseFile(F);
+end;
+
 function TTerminalBackendUnix.PumpInput: Integer;
 var
   Buffer: array[0..READ_BUFFER_SIZE - 1] of Byte;
@@ -252,6 +284,7 @@ begin
     begin
       SetLength(Data, ReadCount);
       Move(Buffer[0], Data[1], ReadCount);
+      DumpRawBytes(Data);
       FParser.FeedBytes(Data);
       Inc(Result, ReadCount);
     end

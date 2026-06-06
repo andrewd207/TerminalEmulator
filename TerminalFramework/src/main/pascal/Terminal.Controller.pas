@@ -86,6 +86,7 @@ end;
 function TTerminalController.Pump: Integer;
 begin
   Result := FBackend.PumpInput;
+  FCore.CheckSyncTimeout;
 end;
 
 procedure TTerminalController.Resize(ACols, ARows: Integer);

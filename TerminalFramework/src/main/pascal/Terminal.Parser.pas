@@ -103,7 +103,7 @@ type
 implementation
 
 uses
-  Math;
+  Math, StrUtils;
 
 constructor TTerminalParser.Create(ACore: TTerminalCore);
 begin
@@ -248,7 +248,7 @@ begin
     if terminal.unicode.DecodeUTF8CodePoint(FUTF8Pending, Index, CodePoint) then
     begin
       FCore.PutCodePoint(CodePoint);
-      if CodePoint>255 then writeln(codepoint);
+      //if CodePoint>255 then writeln(codepoint);
     end
     else
     begin
@@ -323,6 +323,12 @@ end;
 
 procedure TTerminalParser.HandlePrintable(B: Byte);
 begin
+  if (FNeededUTF8Bytes > 0) and ((B and $C0) <> $80) then
+  begin
+    FlushPendingUTF8(True);
+    FNeededUTF8Bytes := 0;
+  end;
+
   if (B and $80) = $00 then
     FNeededUTF8Bytes := 0
   else if (B and $C0) = $80 then
@@ -331,13 +337,25 @@ begin
       Dec(FNeededUTF8Bytes);
   end
   else if (B and $E0) = $C0 then
-    FNeededUTF8Bytes := 1
+  begin
+    if FUTF8Pending <> '' then FlushPendingUTF8(True);
+    FNeededUTF8Bytes := 1;
+  end
   else if (B and $F0) = $E0 then
-    FNeededUTF8Bytes := 2
+  begin
+    if FUTF8Pending <> '' then FlushPendingUTF8(True);
+    FNeededUTF8Bytes := 2;
+  end
   else if (B and $F8) = $F0 then
-    FNeededUTF8Bytes := 3
+  begin
+    if FUTF8Pending <> '' then FlushPendingUTF8(True);
+    FNeededUTF8Bytes := 3;
+  end
   else
+  begin
+    if FUTF8Pending <> '' then FlushPendingUTF8(True);
     FNeededUTF8Bytes := 0;
+  end;
 
   FUTF8Pending := FUTF8Pending + ByteToChar(B);
   FlushPendingUTF8(False);
@@ -359,8 +377,11 @@ begin
     ')': ;
     '\': ;
   else
-    if Assigned(FOnUnknownESC) then
-      FOnUnknownESC(Self, FIntermediates, AFinal);
+    begin
+      FCore.DbgRecord(Format('UNKNOWN ESC inter="%s" final="%s"', [FIntermediates, AFinal]));
+      if Assigned(FOnUnknownESC) then
+        FOnUnknownESC(Self, FIntermediates, AFinal);
+    end;
   end;
 end;
 
@@ -526,11 +547,27 @@ begin
               FCore.SwitchToMainBuffer;
             end;
           end;
+        1048:
+          if AEnable then
+            FCore.SaveCursor
+          else
+            FCore.RestoreCursor;
         1049:
           if AEnable then
-            FCore.SwitchToAltBuffer(True)
+          begin
+            FCore.SaveCursor; { saves into main buffer's slot }
+            FCore.SwitchToAltBuffer(True);
+          end
           else
+          begin
             FCore.SwitchToMainBuffer;
+            FCore.RestoreCursor; { restores from main buffer's slot }
+          end;
+        2026:
+          if AEnable then
+            FCore.BeginSyncUpdate
+          else
+            FCore.EndSyncUpdate;
       end;
     end
     else
@@ -573,6 +610,9 @@ var
   N, TopRow, BottomRow, Row, Col: Integer;
   LocalParams: TIntegerArray;
 begin
+  FCore.DbgRecord(Format('CSI priv="%s" inter="%s" final="%s" pcount=%d p0=%d',
+    [FPrivateMarker, FIntermediates, AFinal, FParamCount,
+     IfThen(FParamCount > 0, FParams[0], 0)]));
   case AFinal of
     'A': FCore.CursorUp(ParamValue(0, 1));
     'B': FCore.CursorDown(ParamValue(0, 1));
@@ -634,17 +674,21 @@ begin
     's': FCore.SaveCursor;
     'u': FCore.RestoreCursor;
   else
-    if Assigned(FOnUnknownCSI) then
     begin
-      LocalParams := BuildParamArray;
-      FOnUnknownCSI(Self, FPrivateMarker, FIntermediates, AFinal, LocalParams);
+      FCore.DbgRecord(Format('UNKNOWN CSI priv="%s" inter="%s" final="%s"',
+        [FPrivateMarker, FIntermediates, AFinal]));
+      if Assigned(FOnUnknownCSI) then
+      begin
+        LocalParams := BuildParamArray;
+        FOnUnknownCSI(Self, FPrivateMarker, FIntermediates, AFinal, LocalParams);
+      end;
     end;
   end;
 end;
 
 procedure TTerminalParser.FeedByte(B: Byte);
 begin
-  if (FNeededUTF8Bytes > 0) and ((B and $C0) = $80) then
+  if (FState = tpsGround) and (FNeededUTF8Bytes > 0) and ((B and $C0) = $80) then
   begin
     HandlePrintable(B);
     Exit;
@@ -987,8 +1031,10 @@ procedure TTerminalParser.FeedBytes(const AData: RawByteString);
 var
   I: Integer;
 begin
+  FCore.DbgRecord(Format('FEED start len=%d', [Length(AData)]));
   for I := 1 to Length(AData) do
     FeedByte(Byte(AData[I]));
+  FCore.DbgRecord(Format('FEED end', []));
 end;
 
 procedure TTerminalParser.FeedBuffer(const ABuffer; ASize: Integer);

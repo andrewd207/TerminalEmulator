@@ -1,18 +1,15 @@
-<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="UTF-8"?>
 <project>
-  <name>ExampleTerminal</name>
+  <name>ViewfpGUI</name>
   <!-- version inherited from aggregator -->
   <author>Andrew Haines</author>
   <license>BSD-3-Clause</license>
+
   <build>
-    <mainSource>ExampleTerminal.pas</mainSource>
-    <executableName>exampleterminal</executableName>
-    <packaging>application</packaging>
-    <compilerOptions>
-      <option>-gl</option>
-      <option>-gw3</option>
-    </compilerOptions>
+    <packaging>library</packaging>
+    <outputDirectory>target</outputDirectory>
   </build>
+
   <test>
     <framework>auto</framework>
     <testSource>TestRunner.pas</testSource>
@@ -20,14 +17,16 @@
       <option>--all --format=plain</option>
     </frameworkOptions>
   </test>
+
   <moduleDependencies>
     <module>../TerminalFramework</module>
-    <module>../ViewfpGUI</module>
   </moduleDependencies>
+
   <dependencies>
     <dependency>
       <name>fpgui-framework</name>
       <version>2.1.0</version>
     </dependency>
   </dependencies>
+
 </project>
