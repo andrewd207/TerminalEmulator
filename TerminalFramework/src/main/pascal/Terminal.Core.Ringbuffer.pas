@@ -37,6 +37,7 @@ type
 
     procedure Push(AItem: T);
     function Pop: T;
+    function PopLast: T;
     function PeekFirst: T;
     function PeekLast: T;
 
@@ -142,6 +143,17 @@ begin
   Result := FData[FTail];
   FData[FTail] := nil;
   FTail := NextIndex(FTail);
+  Dec(FCount);
+end;
+
+function TRingBuffer.PopLast: T;
+begin
+  if FCount = 0 then
+    raise ERingBufferEmpty.Create('Ring buffer is empty');
+
+  FHead := PrevIndex(FHead);
+  Result := FData[FHead];
+  FData[FHead] := nil;
   Dec(FCount);
 end;
 

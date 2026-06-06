@@ -185,6 +185,9 @@ type
     procedure InitBlankCell;
     procedure SetBlankCell(const ACell: TTermCell);
     procedure AppendHistory(const ALine: TTermLine);
+    procedure PopHistoryToTop(ACount: Integer);
+    procedure ReflowToWidth(ANewCols, ANewRows: Integer;
+      var ACursorRow, ACursorCol: Integer);
   public
     constructor Create(ACols, ARows, AScrollbackLimit: Integer);
     destructor Destroy; override;
@@ -203,6 +206,7 @@ type
     property HistoryCount: Integer read GetHistoryCount;
     property BlankCell: TTermCell read FBlankCell write SetBlankCell;
     property Anchor: TTermBufferAnchor read FAnchor write FAnchor;
+    property Lines: TTermLines read FLines;
   end;
 
   TTerminalCore = class
@@ -823,6 +827,268 @@ begin
   FHistory.Push(TTermHistoryLine.Create(CopyLine));
 end;
 
+procedure TTermScreenBuffer.ReflowToWidth(ANewCols, ANewRows: Integer;
+  var ACursorRow, ACursorCol: Integer);
+type
+  TLogicalLine = record
+    Cells: TTermCellLine;
+    EndsWithWrap: Boolean; { the source line ran past its right margin }
+  end;
+var
+  Logicals: array of TLogicalLine;
+  LogCount: Integer;
+  CurLogCells: TTermCellLine;
+  CurLogLen: Integer;
+  CurLogWrapped: Boolean;
+  CursorLogIdx, CursorLogOffset: Integer;
+  HistCount: Integer;
+  TotalSrc: Integer;
+  SrcRow: Integer;
+  SrcLine: TTermLine;
+  EffLen: Integer;
+  I: Integer;
+
+  procedure AppendCellToLog(const C: TTermCell);
+  begin
+    if Length(CurLogCells) <= CurLogLen then
+      SetLength(CurLogCells, CurLogLen + 64);
+    CurLogCells[CurLogLen] := C;
+    Inc(CurLogLen);
+  end;
+
+  procedure CloseCurrentLogical;
+  begin
+    if LogCount >= Length(Logicals) then
+      SetLength(Logicals, LogCount + 16);
+    SetLength(CurLogCells, CurLogLen);
+    Logicals[LogCount].Cells := CurLogCells;
+    Logicals[LogCount].EndsWithWrap := CurLogWrapped;
+    Inc(LogCount);
+    CurLogCells := nil;
+    CurLogLen := 0;
+    CurLogWrapped := False;
+  end;
+
+  function EffectiveLength(const ALine: TTermLine; AIsWrapped: Boolean): Integer;
+  var
+    K: Integer;
+  begin
+    if AIsWrapped then
+      Exit(Length(ALine.Cells));
+    K := Length(ALine.Cells) - 1;
+    while (K >= 0)
+          and ((ALine.Cells[K].CodePoint = 0)
+               or (ALine.Cells[K].CodePoint = Ord(' '))) do
+      Dec(K);
+    Result := K + 1;
+  end;
+
+var
+  NewRows: array of TTermLine;
+  NewRowCount: Integer;
+  Logical: TLogicalLine;
+  Pieces, P, Start, ChunkLen, Idx: Integer;
+  ReflowBlank: TTermCell;
+  CursorAbsRow, CursorAbsCol: Integer;
+  KeepInVisible, ExcessForHistory: Integer;
+
+  function StartNewRow: Integer;
+  begin
+    if NewRowCount >= Length(NewRows) then
+      SetLength(NewRows, NewRowCount + 32);
+    NewRows[NewRowCount].Cells := nil;
+    NewRows[NewRowCount].Flags := [];
+    NewRows[NewRowCount].Init(ANewCols, ReflowBlank);
+    Result := NewRowCount;
+    Inc(NewRowCount);
+  end;
+
+begin
+  if ANewCols < 1 then ANewCols := 1;
+  if ANewRows < 1 then ANewRows := 1;
+  ReflowBlank := FBlankCell;
+
+  if Assigned(FHistory) then
+    HistCount := FHistory.Count
+  else
+    HistCount := 0;
+  TotalSrc := HistCount + Length(FLines);
+
+  { 1. Collect cells into logical lines, joining runs where the previous row
+     was tlfWrapped. Track where the cursor maps to in logical coordinates. }
+  CursorLogIdx := -1;
+  CursorLogOffset := 0;
+  CurLogCells := nil;
+  CurLogLen := 0;
+  CurLogWrapped := False;
+  LogCount := 0;
+
+  for SrcRow := 0 to TotalSrc - 1 do
+  begin
+    if SrcRow < HistCount then
+      SrcLine := FHistory[SrcRow].Line
+    else
+      SrcLine := FLines[SrcRow - HistCount];
+    EffLen := EffectiveLength(SrcLine, tlfWrapped in SrcLine.Flags);
+
+    if SrcRow = HistCount + ACursorRow then
+    begin
+      CursorLogIdx := LogCount;
+      CursorLogOffset := CurLogLen + ACursorCol;
+    end;
+
+    for I := 0 to EffLen - 1 do
+      AppendCellToLog(SrcLine.Cells[I]);
+
+    { CurLogWrapped reflects whether the CURRENT (most recently added) source
+      row ends with a wrap. If it does, this logical continues into the next
+      source row; otherwise close out the logical here. }
+    CurLogWrapped := tlfWrapped in SrcLine.Flags;
+    if not CurLogWrapped then
+      CloseCurrentLogical;
+  end;
+  if (CurLogLen > 0) or CurLogWrapped then
+    CloseCurrentLogical;
+
+  { Trim trailing empty (blank) logical lines that came from padding at the
+    bottom of the source buffer. We'll re-pad with blanks at emit time if
+    the visible buffer still has room; without this trim we'd push the
+    OLDEST real content into history just to make room for trailing blanks. }
+  while (LogCount > 0)
+        and (Length(Logicals[LogCount - 1].Cells) = 0)
+        and (not Logicals[LogCount - 1].EndsWithWrap)
+        and (CursorLogIdx <> LogCount - 1) do
+    Dec(LogCount);
+
+  { 2. Re-emit at the new width. Each logical line of length L becomes
+     ceil(L/ANewCols) rows; all but the last get tlfWrapped (and if the
+     source logical ended with wrap, so does the last new row). }
+  NewRows := nil;
+  NewRowCount := 0;
+  CursorAbsRow := -1;
+  CursorAbsCol := 0;
+
+  for I := 0 to LogCount - 1 do
+  begin
+    Logical := Logicals[I];
+    if Length(Logical.Cells) = 0 then
+    begin
+      Idx := StartNewRow;
+      if Logical.EndsWithWrap then
+        Include(NewRows[Idx].Flags, tlfWrapped);
+      if I = CursorLogIdx then
+      begin
+        CursorAbsRow := Idx;
+        CursorAbsCol := 0;
+      end;
+      Continue;
+    end;
+
+    Pieces := (Length(Logical.Cells) + ANewCols - 1) div ANewCols;
+    for P := 0 to Pieces - 1 do
+    begin
+      Start := P * ANewCols;
+      ChunkLen := Length(Logical.Cells) - Start;
+      if ChunkLen > ANewCols then ChunkLen := ANewCols;
+
+      Idx := StartNewRow;
+      for ChunkLen := 0 to (Length(Logical.Cells) - Start) - 1 do
+      begin
+        if ChunkLen >= ANewCols then Break;
+        NewRows[Idx].Cells[ChunkLen] := Logical.Cells[Start + ChunkLen];
+      end;
+      if (P < Pieces - 1) or Logical.EndsWithWrap then
+        Include(NewRows[Idx].Flags, tlfWrapped);
+
+      if (I = CursorLogIdx) and (CursorLogOffset >= Start)
+         and (CursorLogOffset < Start + ANewCols)
+         and (CursorAbsRow = -1) then
+      begin
+        CursorAbsRow := Idx;
+        CursorAbsCol := CursorLogOffset - Start;
+      end;
+    end;
+  end;
+
+  SetLength(NewRows, NewRowCount);
+
+  { 3. Split rows into history and the new visible buffer. Keep the most
+     recent ANewRows for the visible buffer; older rows go to history. If
+     the cursor would land below the new visible buffer, slide more rows
+     into history until it fits. }
+  KeepInVisible := ANewRows;
+  if KeepInVisible > NewRowCount then KeepInVisible := NewRowCount;
+  ExcessForHistory := NewRowCount - KeepInVisible;
+
+  if (CursorAbsRow >= 0) and (CursorAbsRow - ExcessForHistory >= KeepInVisible) then
+  begin
+    ExcessForHistory := CursorAbsRow - (KeepInVisible - 1);
+    if ExcessForHistory > NewRowCount - 1 then ExcessForHistory := NewRowCount - 1;
+  end;
+
+  if Assigned(FHistory) then
+  begin
+    FHistory.Clear;
+    for I := 0 to ExcessForHistory - 1 do
+      FHistory.Push(TTermHistoryLine.Create(NewRows[I]));
+  end;
+
+  SetLength(FLines, ANewRows);
+  for I := 0 to ANewRows - 1 do
+    FLines[I].Init(ANewCols, ReflowBlank);
+
+  for I := 0 to KeepInVisible - 1 do
+  begin
+    if ExcessForHistory + I < NewRowCount then
+      FLines[I] := NewRows[ExcessForHistory + I];
+  end;
+
+  FCols := ANewCols;
+  FRows := ANewRows;
+
+  { 4. Translate the cursor's absolute new-row into visible coordinates. }
+  if CursorAbsRow >= 0 then
+  begin
+    ACursorRow := CursorAbsRow - ExcessForHistory;
+    ACursorCol := CursorAbsCol;
+    if ACursorRow < 0 then ACursorRow := 0;
+    if ACursorRow >= ANewRows then ACursorRow := ANewRows - 1;
+    if ACursorCol < 0 then ACursorCol := 0;
+    if ACursorCol >= ANewCols then ACursorCol := ANewCols - 1;
+  end
+  else
+  begin
+    if ACursorRow >= ANewRows then ACursorRow := ANewRows - 1;
+    if ACursorCol >= ANewCols then ACursorCol := ANewCols - 1;
+  end;
+end;
+
+procedure TTermScreenBuffer.PopHistoryToTop(ACount: Integer);
+var
+  I, R: Integer;
+  HLine: TTermHistoryLine;
+begin
+  if (ACount <= 0) or (not Assigned(FHistory)) then Exit;
+  if ACount > FHistory.Count then ACount := FHistory.Count;
+  if ACount > FRows then ACount := FRows;
+
+  { Shift existing rows down by ACount; bottom ACount rows are dropped. }
+  for R := FRows - 1 downto ACount do
+    FLines[R] := FLines[R - ACount];
+
+  { Pop most-recent history rows and place them at the top, with the most-
+    recent appearing just above where the live view used to start. }
+  for I := ACount - 1 downto 0 do
+  begin
+    HLine := FHistory.PopLast;
+    try
+      FLines[I] := HLine.Line.MakeResizedCopy(FCols, FBlankCell);
+    finally
+      HLine.Free;
+    end;
+  end;
+end;
+
 procedure TTermScreenBuffer.ScrollUp(ATopRow, ABottomRow, ACount: Integer);
 var
   I, R: Integer;
@@ -1242,20 +1508,90 @@ begin
 end;
 
 procedure TTerminalCore.Resize(ACols, ARows: Integer);
+var
+  OldRows, OldCols: Integer;
+  OldAnchor: TTermBufferAnchor;
+  TopRowsToDrop, RowsFromHistory, I: Integer;
+  CR, CC: Integer;
 begin
   if ACols < 1 then ACols := 1;
   if ARows < 1 then ARows := 1;
 
+  OldRows := FRows;
+  OldCols := FCols;
+
+  { Column change: re-flow logical lines (history + visible) to the new
+    width so wrapped fragments are merged or split as needed. After reflow,
+    columns are at the new value and we proceed with row adjustments using
+    the new column count. }
+  if ACols <> OldCols then
+  begin
+    CR := FCursor.Row;
+    CC := FCursor.Col;
+    FMainBuffer.ReflowToWidth(ACols, FRows, CR, CC);
+    FCursor.Row := CR;
+    FCursor.Col := CC;
+  end;
+
   FCols := ACols;
   FRows := ARows;
 
+  { Main-buffer resize policy.
+
+    SHRINK: keep the cursor row stable. Drop bottom rows when there is room;
+    if the cursor would fall off-screen, push the top rows (cursor would have
+    overshot by) into scrollback history first.
+
+    GROW: pull rows back from scrollback history if available, prepending
+    them to the top of the buffer and shifting existing content down. Cursor
+    moves with the shifted content. If history can't fill the new space, the
+    remaining rows are added as blank at the bottom. }
+  TopRowsToDrop := 0;
+  RowsFromHistory := 0;
+
+  if (ARows < OldRows) and (FCursor.Row >= ARows) then
+    TopRowsToDrop := FCursor.Row - (ARows - 1)
+  else if (ARows > OldRows) and (FMainBuffer.HistoryCount > 0) then
+    RowsFromHistory := Min(ARows - OldRows, FMainBuffer.HistoryCount);
+
+  if TopRowsToDrop > 0 then
+  begin
+    for I := 0 to TopRowsToDrop - 1 do
+      FMainBuffer.AppendHistory(FMainBuffer.Lines[I]);
+    DbgRecord(Format('Resize: pushed %d top rows to history (newhist=%d)',
+      [TopRowsToDrop, FMainBuffer.HistoryCount]));
+  end;
+
+  OldAnchor := FMainBuffer.Anchor;
+  if TopRowsToDrop > 0 then
+    FMainBuffer.Anchor := abBottom
+  else
+    FMainBuffer.Anchor := abTop;
   FMainBuffer.Resize(ACols, ARows, True);
+  FMainBuffer.Anchor := OldAnchor;
+
+  if RowsFromHistory > 0 then
+  begin
+    FMainBuffer.PopHistoryToTop(RowsFromHistory);
+    DbgRecord(Format('Resize: popped %d rows from history to top (newhist=%d)',
+      [RowsFromHistory, FMainBuffer.HistoryCount]));
+  end;
+
   FAltBuffer.Resize(ACols, ARows, True);
 
   SetTabStopDefaults;
   FTopMargin := 0;
   FBottomMargin := FRows - 1;
   FCursor.PendingWrap := False;
+
+  if not FUseAltBuffer then
+  begin
+    if TopRowsToDrop > 0 then
+      Dec(FCursor.Row, TopRowsToDrop)
+    else if RowsFromHistory > 0 then
+      Inc(FCursor.Row, RowsFromHistory);
+  end;
+
   ClampCursor;
   MarkAllDirty;
 end;
@@ -1507,10 +1843,19 @@ var
 begin
   case AMode of
     0:
-      for C := FCursor.Col to FCols - 1 do
       begin
-        P := ActiveBuffer.CellAt(C, FCursor.Row);
-        if P <> nil then ClearCell(P^);
+        for C := FCursor.Col to FCols - 1 do
+        begin
+          P := ActiveBuffer.CellAt(C, FCursor.Row);
+          if P <> nil then ClearCell(P^);
+        end;
+        { EL 0 erases to end of line — the line no longer overruns its right
+          margin, so any prior autowrap-continuation flag must clear. If the
+          erase covers the entire line (cursor at col 0), the row above can
+          no longer be flagged as wrapping into this row either. }
+        Exclude(ActiveBuffer.Lines[FCursor.Row].Flags, tlfWrapped);
+        if (FCursor.Col = 0) and (FCursor.Row > 0) then
+          Exclude(ActiveBuffer.Lines[FCursor.Row - 1].Flags, tlfWrapped);
       end;
     1:
       for C := 0 to FCursor.Col do
@@ -1519,7 +1864,12 @@ begin
         if P <> nil then ClearCell(P^);
       end;
     2:
-      ActiveBuffer.ClearRow(FCursor.Row);
+      begin
+        ActiveBuffer.ClearRow(FCursor.Row);
+        Exclude(ActiveBuffer.Lines[FCursor.Row].Flags, tlfWrapped);
+        if FCursor.Row > 0 then
+          Exclude(ActiveBuffer.Lines[FCursor.Row - 1].Flags, tlfWrapped);
+      end;
   end;
   InvalidateRect(0, FCursor.Row, FCols - 1, FCursor.Row);
 end;
@@ -1727,6 +2077,10 @@ begin
       FCursor.Col := 0;
       InvalidateRect(0, FTopMargin, FCols - 1, FBottomMargin);
     end;
+    { Clear the destination row of stale content — the wrap continuation owns
+      this row from col 0 onward, so any leftover characters from a previous
+      redraw at this row would otherwise survive past the wrap fill. }
+    ActiveBuffer.ClearRow(FCursor.Row);
   end;
 
   if Width = 2 then

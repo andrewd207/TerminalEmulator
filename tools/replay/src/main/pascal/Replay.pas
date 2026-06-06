@@ -146,6 +146,16 @@ begin
               Copy(Ln, Length('--- chunk len=') + 1,
                    Pos(' ---', Ln) - Length('--- chunk len=') - 1), 0);
             Mode := mWantHex;
+          end
+          else if (Pos('--- resize cols=', Ln) = 1) then
+          begin
+            DumpBuffer('PRE-RESIZE');
+            Cols := StrToIntDef(Copy(Ln, Length('--- resize cols=') + 1,
+                Pos(' rows=', Ln) - Length('--- resize cols=') - 1), Cols);
+            Rows := StrToIntDef(Copy(Ln, Pos('rows=', Ln) + 5,
+                Pos(' ---', Ln) - Pos('rows=', Ln) - 5), Rows);
+            GCore.Resize(Cols, Rows);
+            DumpBuffer(Format('POST-RESIZE %dx%d', [Cols, Rows]));
           end;
         mWantHex:
           begin

@@ -90,9 +90,18 @@ begin
 end;
 
 procedure TTerminalController.Resize(ACols, ARows: Integer);
+var
+  F: TextFile;
 begin
   FCore.Resize(ACols, ARows);
   FBackend.Resize(ACols, ARows);
+  try
+    AssignFile(F, '/tmp/term-raw.log');
+    if FileExists('/tmp/term-raw.log') then Append(F) else Rewrite(F);
+    WriteLn(F, '--- resize cols=', ACols, ' rows=', ARows, ' ---');
+    CloseFile(F);
+  except
+  end;
 end;
 
 procedure TTerminalController.SendInput(const AData: RawByteString);
