@@ -9,6 +9,8 @@
 #include <string.h>
 #include <stdlib.h>
 
+#define SETTINGS_GROUP      "appearance"
+#define SETTINGS_KEY_FONT   "font-desc"
 #define PUMP_INTERVAL_MS    20
 #define CURSOR_BLINK_MS     750
 #define SELECTION_DRAG_PX   3
@@ -108,6 +110,9 @@ static void update_font_metrics(TermViewWidget *self);
 static void update_adjustment(TermViewWidget *self);
 static void send_resize_to_tv(TermViewWidget *self);
 static void rebuild_popover(TermViewWidget *self);
+static void load_settings(TermViewWidget *self);
+static void save_settings(TermViewWidget *self);
+static char *settings_path(void);
 
 static guint32 cell_fg(uint32_t fg) {
     return (fg == TV_COLOR_DEFAULT) ? DEFAULT_FG : (fg & 0x00FFFFFFu);
@@ -584,6 +589,46 @@ static void on_action_copy_html_all(GSimpleAction *a G_GNUC_UNUSED, GVariant *p 
     copy_html_to_clipboard(TERM_VIEW_WIDGET(ud), TV_HTML_ALL);
 }
 
+static char *settings_path(void) {
+    return g_build_filename(g_get_user_config_dir(), "termview", "config.ini", NULL);
+}
+
+static void load_settings(TermViewWidget *self) {
+    char *path = settings_path();
+    GKeyFile *kf = g_key_file_new();
+    if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL)) {
+        char *s = g_key_file_get_string(kf, SETTINGS_GROUP, SETTINGS_KEY_FONT, NULL);
+        if (s && *s) {
+            if (self->font_desc) pango_font_description_free(self->font_desc);
+            self->font_desc = pango_font_description_from_string(s);
+        }
+        g_free(s);
+    }
+    g_key_file_free(kf);
+    g_free(path);
+}
+
+static void save_settings(TermViewWidget *self) {
+    char *path = settings_path();
+    char *dir = g_path_get_dirname(path);
+    g_mkdir_with_parents(dir, 0700);
+    g_free(dir);
+
+    /* Read-modify-write so we don't clobber settings other instances saved. */
+    GKeyFile *kf = g_key_file_new();
+    g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL);
+
+    char *font_str = self->font_desc
+        ? pango_font_description_to_string(self->font_desc)
+        : g_strdup("Monospace 10");
+    g_key_file_set_string(kf, SETTINGS_GROUP, SETTINGS_KEY_FONT, font_str);
+    g_free(font_str);
+
+    g_key_file_save_to_file(kf, path, NULL);
+    g_key_file_free(kf);
+    g_free(path);
+}
+
 static void on_font_dialog_done(GObject *src, GAsyncResult *res, gpointer ud) {
     TermViewWidget *self = TERM_VIEW_WIDGET(ud);
     PangoFontDescription *fd = gtk_font_dialog_choose_font_finish(
@@ -594,6 +639,7 @@ static void on_font_dialog_done(GObject *src, GAsyncResult *res, gpointer ud) {
     update_font_metrics(self);
     send_resize_to_tv(self);
     gtk_widget_queue_resize(GTK_WIDGET(self));
+    save_settings(self);
 }
 
 static void on_action_font(GSimpleAction *a G_GNUC_UNUSED, GVariant *p G_GNUC_UNUSED, gpointer ud) {
@@ -1072,6 +1118,8 @@ static void term_view_widget_init(TermViewWidget *self) {
     gtk_widget_add_controller(GTK_WIDGET(self), scroll);
 
     set_vadjustment(self, NULL);
+
+    load_settings(self);
 }
 
 /* ------------------------------------------------------------------ */
