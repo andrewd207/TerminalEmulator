@@ -400,20 +400,14 @@ end;
 
 function TermDefaultColorFG: TTermColor;
 begin
-  Result.Mode := tcmRGB;
-  Result.Index := 0;
-  Result.R := (TERM_DEFAULT_FG shr 16) and $FF;
-  Result.G := (TERM_DEFAULT_FG shr 8) and $FF;
-  Result.B := TERM_DEFAULT_FG and $FF;
+  Result := Default(TTermColor);
+  Result.Mode := tcmDefault;
 end;
 
 function TermDefaultColorBG: TTermColor;
 begin
-  Result.Mode := tcmRGB;
-  Result.Index := 0;
-  Result.R := (TERM_DEFAULT_BG shr 16) and $FF;
-  Result.G := (TERM_DEFAULT_BG shr 8) and $FF;
-  Result.B := TERM_DEFAULT_BG and $FF;
+  Result := Default(TTermColor);
+  Result.Mode := tcmDefault;
 end;
 
 function TermIndexedColor(AIndex: Byte): TTermColor;

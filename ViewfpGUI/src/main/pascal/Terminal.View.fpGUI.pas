@@ -32,6 +32,7 @@ type
     FSelection: TTermSelection;
     FSelectionFGColor: TfpgColor;
     FSelectionBGColor: TfpgColor;
+    FOnFontChanged: TNotifyEvent;
     function CellSelected(AVirtualRow, ACol: Integer): Boolean;
     procedure ContextMenuItemClick(Sender: TObject);
     procedure ContextPopupShow(Sender: TObject);
@@ -51,6 +52,7 @@ type
     function CellRect(ACol, ARow: Integer): TfpgRect;
     function MapColor(const AColor: TTermColor; IsBackground: Boolean): TfpgColor;
     function CellText(const ACell: TTermCell): Utf8String;
+    function PickFont(const AAttrs: TTermAttrFlags): TfpgFontResourceBase;
     procedure PaintCell(const ACanvas: TfpgCanvas; ACol, AViewRow: Integer; const ACell: TTermCell; AHasCursor: Boolean); inline;
     function PixelToCell(X, Y: Integer): TTermCellPos;
     procedure UpdateScrollBarCoords;
@@ -81,6 +83,7 @@ type
     property Controller: TTerminalController read FController;
     property FontDesc: string read FFontDesc write FFontDesc;
     property CursorStyle: TCursorStyle read FCursorStyle write FCursorStyle;
+    property OnFontChanged: TNotifyEvent read FOnFontChanged write FOnFontChanged;
   end;
 
   TTerminalFPGUIForm = class(TfpgForm)
@@ -95,6 +98,7 @@ implementation
 
 uses
   Math;
+
 
 const
   CURSOR_BLINK_MS = 750;
@@ -384,7 +388,11 @@ var
 begin
   S := FFontDesc;
   if SelectFontDialog(S, 'mono') then
+  begin
      FontDesc:=S;
+     if Assigned(FOnFontChanged) then
+       FOnFontChanged(Self);
+  end;
   UpdateMetrics;
   SyncSizeToController;
 end;
@@ -429,7 +437,7 @@ begin
     tcmIndexed, tcmRGB:
       begin
         RGB := TermColorToRGB(AColor);
-        Result := RGB;
+        Result := TfpgColor($FF000000) or TfpgColor(RGB);
       end;
   else
     if IsBackground then
@@ -437,6 +445,18 @@ begin
     else
       Result := FDefaultFGColor;
   end;
+end;
+
+function TTerminalFPGUIView.PickFont(const AAttrs: TTermAttrFlags): TfpgFontResourceBase;
+var
+  Desc: string;
+begin
+  Desc := FFontDesc;
+  if tafBold in AAttrs then Desc := Desc + ':bold';
+  if tafItalic in AAttrs then Desc := Desc + ':italic';
+  Result := fpgApplication.FontManager.GetFont(Desc);
+  if Result = nil then
+    Result := fpgApplication.FontManager.GetFont(FFontDesc);
 end;
 
 function TTerminalFPGUIView.CellText(const ACell: TTermCell): utf8string;
@@ -465,8 +485,17 @@ begin
   BG := MapColor(ACell.BG, True);
   FG := MapColor(ACell.FG, False);
 
+  if tafFaint in ACell.Attrs then
+    FG := TfpgColor($FF000000)
+       or ((FG and $FE0000) shr 1)
+       or ((FG and $00FE00) shr 1)
+       or ((FG and $0000FE) shr 1);
+
   if tafInverse in ACell.Attrs then
     specialize Swap<TfpgColor>(FG, BG);
+
+  if tafHidden in ACell.Attrs then
+    FG := BG;
 
   if IsSelected then
   begin
@@ -477,15 +506,33 @@ begin
   if AHasCursor and (FCursorBlinkVisible) then
     specialize Swap<TfpgColor>(FG, BG);
 
+  if tafWideLead in ACell.Attrs then
+    R.Width := FCharWidth * 2;
+
   ACanvas.Color := BG;
   ACanvas.FillRectangle(R);
 
   if ACell.isBlank then
     Exit;
 
+  // Blink: hide glyph during off phase. Reuse the cursor blink toggle.
+  if (tafBlink in ACell.Attrs) and (not FCursorBlinkVisible) then
+    Exit;
+
   S := CellText(ACell);
+  ACanvas.SetFont(PickFont(ACell.Attrs));
   ACanvas.TextColor := FG;
   ACanvas.DrawString(R.Left, R.Top, S);
+
+  if (tafUnderline in ACell.Attrs) or (tafStrike in ACell.Attrs) then
+  begin
+    ACanvas.Color := FG;
+    if tafUnderline in ACell.Attrs then
+      ACanvas.DrawLine(R.Left, R.Bottom - 1, R.Right, R.Bottom - 1);
+    if tafStrike in ACell.Attrs then
+      ACanvas.DrawLine(R.Left, R.Top + R.Height div 2,
+                       R.Right, R.Top + R.Height div 2);
+  end;
 end;
 
 function TTerminalFPGUIView.PixelToCell(X, Y: Integer): TTermCellPos;
