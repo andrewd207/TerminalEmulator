@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<project>
+  <name>Replay</name>
+  <author>Andrew Haines</author>
+  <license>BSD-3-Clause</license>
+  <build>
+    <mainSource>Replay.pas</mainSource>
+    <executableName>replay</executableName>
+    <packaging>application</packaging>
+    <compilerOptions>
+      <option>-gl</option>
+      <option>-gw3</option>
+    </compilerOptions>
+  </build>
+  <moduleDependencies>
+    <module>../../TerminalFramework</module>
+  </moduleDependencies>
+</project>

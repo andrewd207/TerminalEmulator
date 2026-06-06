@@ -342,6 +342,7 @@ type
     property Cursor: TTermCursor read FCursor;
     property InSyncUpdate: Boolean read GetInSyncUpdate;
     property InAltBuffer: Boolean read FUseAltBuffer;
+    function CellAt(ACol, ARow: Integer): PTermCell;
     property BracketedPasteMode: Boolean read FBracketedPasteMode write SetBracketedPasteMode;
     property OnInvalidate: TTerminalInvalidateEvent read FOnInvalidate write FOnInvalidate;
     property OnBell: TTerminalBellEvent read FOnBell write FOnBell;
@@ -917,6 +918,11 @@ begin
   FAltBuffer.Free;
   FMainBuffer.Free;
   inherited Destroy;
+end;
+
+function TTerminalCore.CellAt(ACol, ARow: Integer): PTermCell;
+begin
+  Result := ActiveBuffer.CellAt(ACol, ARow);
 end;
 
 function TTerminalCore.ActiveBuffer: TTermScreenBuffer;

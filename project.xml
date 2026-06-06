@@ -13,6 +13,7 @@
     <module>TerminalFramework</module>
     <module>ViewfpGUI</module>
     <module>ExampleTerminal</module>
+    <module>tools/replay</module>
   </modules>
 
 <profiles>
