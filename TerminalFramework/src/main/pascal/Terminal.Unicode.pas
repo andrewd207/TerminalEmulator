@@ -1,3 +1,12 @@
+{
+  This file is part of the TerminalEmulatorAgregator project.
+  Copyright (c) 2026 Andrew Haines
+
+  SPDX-License-Identifier: BSD-3-Clause
+
+  Licensed under the BSD-3-Clause License. See LICENSE file for details.
+}
+
 unit Terminal.Unicode;
 
 
