@@ -113,6 +113,9 @@ ExampleTerminalGtk4: ViewGtk4
 
 gtk4: ExampleTerminalGtk4
 
+release:
+	./tools/release.sh
+
 clean:
 	@for d in TerminalFramework ViewfpGUI ViewLCL ExampleTerminal ExampleTerminalLCL tools/replay; do \
 		rm -rf $$d/target/units $$d/target/pasbuild-status $$d/target/bootstrap_program* 2>/dev/null; \

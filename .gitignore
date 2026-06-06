@@ -13,3 +13,4 @@ backup/
 # Lazarus session state and editor save files
 *.lps
 *.save
+release/
