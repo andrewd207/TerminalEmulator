@@ -854,6 +854,47 @@ static void send_str(TermViewWidget *self, const char *s) {
     if (self->tv) tv_send_input(self->tv, s, strlen(s));
 }
 
+/* xterm modifyOtherKeys param: Shift=1, Alt=2, Ctrl=4, +1. */
+static int xterm_mod_param(GdkModifierType state) {
+    int n = 1;
+    if (state & GDK_SHIFT_MASK)   n += 1;
+    if (state & GDK_ALT_MASK)     n += 2;
+    if (state & GDK_CONTROL_MASK) n += 4;
+    return n;
+}
+
+static gboolean has_mod(GdkModifierType state) {
+    return (state & (GDK_SHIFT_MASK | GDK_ALT_MASK | GDK_CONTROL_MASK)) != 0;
+}
+
+/* Cursor / Home / End / F1-F4: CSI <final> or CSI 1;<mod> <final>.
+   F1-F4 use SS3 (ESC O P/Q/R/S) bare, CSI form when modified. */
+static void send_csi_final(TermViewWidget *self, char final,
+                           GdkModifierType state, gboolean use_ss3) {
+    char buf[16];
+    int n;
+    if (has_mod(state))
+        n = snprintf(buf, sizeof buf, "\x1b[1;%d%c", xterm_mod_param(state), final);
+    else if (use_ss3)
+        n = snprintf(buf, sizeof buf, "\x1bO%c", final);
+    else
+        n = snprintf(buf, sizeof buf, "\x1b[%c", final);
+    if (self->tv && n > 0) tv_send_input(self->tv, buf, (size_t)n);
+}
+
+/* Tilde-terminated CSI: ESC [ <n> ~ or ESC [ <n> ; <mod> ~.
+   Insert=2, Delete=3, PageUp=5, PageDown=6, F5=15, F6-F12=17-24. */
+static void send_csi_tilde(TermViewWidget *self, int code,
+                           GdkModifierType state) {
+    char buf[16];
+    int n;
+    if (has_mod(state))
+        n = snprintf(buf, sizeof buf, "\x1b[%d;%d~", code, xterm_mod_param(state));
+    else
+        n = snprintf(buf, sizeof buf, "\x1b[%d~", code);
+    if (self->tv && n > 0) tv_send_input(self->tv, buf, (size_t)n);
+}
+
 static gboolean on_key_pressed(GtkEventControllerKey *ek, guint keyval,
                                guint keycode G_GNUC_UNUSED,
                                GdkModifierType state, gpointer ud) {
@@ -872,8 +913,9 @@ static gboolean on_key_pressed(GtkEventControllerKey *ek, guint keyval,
             on_action_paste(NULL, NULL, self); return TRUE;
         }
     }
-    /* Shift+Insert paste. */
-    if (shift && keyval == GDK_KEY_Insert) {
+    /* Shift+Insert is the unconditional paste escape hatch. Check before
+       routing Insert to the PTY. */
+    if (shift && !ctrl && keyval == GDK_KEY_Insert) {
         on_action_paste(NULL, NULL, self); return TRUE;
     }
 
@@ -883,15 +925,31 @@ static gboolean on_key_pressed(GtkEventControllerKey *ek, guint keyval,
         case GDK_KEY_Tab: send_str(self, "\t"); return TRUE;
         case GDK_KEY_ISO_Left_Tab: send_str(self, "\x1b[Z"); return TRUE;
         case GDK_KEY_Escape: send_str(self, "\x1b"); return TRUE;
-        case GDK_KEY_Up:    send_str(self, ctrl ? "\x1b[1;5A" : "\x1b[A"); return TRUE;
-        case GDK_KEY_Down:  send_str(self, ctrl ? "\x1b[1;5B" : "\x1b[B"); return TRUE;
-        case GDK_KEY_Left:  send_str(self, ctrl ? "\x1b[1;5D" : "\x1b[D"); return TRUE;
-        case GDK_KEY_Right: send_str(self, ctrl ? "\x1b[1;5C" : "\x1b[C"); return TRUE;
-        case GDK_KEY_Home:  send_str(self, "\x1b[H"); return TRUE;
-        case GDK_KEY_End:   send_str(self, "\x1b[F"); return TRUE;
-        case GDK_KEY_Page_Up:   send_str(self, "\x1b[5~"); return TRUE;
-        case GDK_KEY_Page_Down: send_str(self, "\x1b[6~"); return TRUE;
-        case GDK_KEY_Delete:    send_str(self, "\x1b[3~"); return TRUE;
+
+        case GDK_KEY_Up:    send_csi_final(self, 'A', state, FALSE); return TRUE;
+        case GDK_KEY_Down:  send_csi_final(self, 'B', state, FALSE); return TRUE;
+        case GDK_KEY_Right: send_csi_final(self, 'C', state, FALSE); return TRUE;
+        case GDK_KEY_Left:  send_csi_final(self, 'D', state, FALSE); return TRUE;
+        case GDK_KEY_Home:  send_csi_final(self, 'H', state, FALSE); return TRUE;
+        case GDK_KEY_End:   send_csi_final(self, 'F', state, FALSE); return TRUE;
+
+        case GDK_KEY_Insert:    send_csi_tilde(self, 2,  state); return TRUE;
+        case GDK_KEY_Delete:    send_csi_tilde(self, 3,  state); return TRUE;
+        case GDK_KEY_Page_Up:   send_csi_tilde(self, 5,  state); return TRUE;
+        case GDK_KEY_Page_Down: send_csi_tilde(self, 6,  state); return TRUE;
+
+        case GDK_KEY_F1: send_csi_final(self, 'P', state, TRUE); return TRUE;
+        case GDK_KEY_F2: send_csi_final(self, 'Q', state, TRUE); return TRUE;
+        case GDK_KEY_F3: send_csi_final(self, 'R', state, TRUE); return TRUE;
+        case GDK_KEY_F4: send_csi_final(self, 'S', state, TRUE); return TRUE;
+        case GDK_KEY_F5:  send_csi_tilde(self, 15, state); return TRUE;
+        case GDK_KEY_F6:  send_csi_tilde(self, 17, state); return TRUE;
+        case GDK_KEY_F7:  send_csi_tilde(self, 18, state); return TRUE;
+        case GDK_KEY_F8:  send_csi_tilde(self, 19, state); return TRUE;
+        case GDK_KEY_F9:  send_csi_tilde(self, 20, state); return TRUE;
+        case GDK_KEY_F10: send_csi_tilde(self, 21, state); return TRUE;
+        case GDK_KEY_F11: send_csi_tilde(self, 23, state); return TRUE;
+        case GDK_KEY_F12: send_csi_tilde(self, 24, state); return TRUE;
     }
 
     if (ctrl && !shift) {
