@@ -932,22 +932,89 @@ begin
   Invalidate;
 end;
 
+{ Encode shift/alt/ctrl as the xterm modifyOtherKeys parameter (1..8).
+  Bit 0 = Shift, bit 1 = Alt, bit 2 = Ctrl, then +1. }
+function XtermModParam(Shift: TShiftState): Integer;
+begin
+  Result := 1;
+  if ssShift in Shift then Inc(Result, 1);
+  if ssAlt   in Shift then Inc(Result, 2);
+  if ssCtrl  in Shift then Inc(Result, 4);
+end;
+
+function HasMod(Shift: TShiftState): Boolean; inline;
+begin
+  Result := [ssCtrl, ssShift, ssAlt] * Shift <> [];
+end;
+
+{ Cursor / Home / End / F1-F4 style: CSI <final> or CSI 1;<mod> <final>.
+  F1-F4 normally use SS3 (ESC O P/Q/R/S); with a modifier xterm switches
+  to the CSI form (ESC [1;<mod>P). Pass AUseSS3=True for F1-F4. }
+procedure SendCSIFinal(ACtrl: TTerminalController; AFinal: AnsiChar;
+  Shift: TShiftState; AUseSS3: Boolean = False);
+begin
+  if HasMod(Shift) then
+    ACtrl.SendInput(#27'[1;' + IntToStr(XtermModParam(Shift)) + AFinal)
+  else if AUseSS3 then
+    ACtrl.SendInput(#27'O' + AFinal)
+  else
+    ACtrl.SendInput(#27'[' + AFinal);
+end;
+
+{ Tilde-terminated CSI: CSI <n> ~ or CSI <n> ; <mod> ~. Used for
+  Insert(2), Delete(3), PageUp(5), PageDown(6), F5(15), F6-F12(17-24). }
+procedure SendCSITilde(ACtrl: TTerminalController; N: Integer;
+  Shift: TShiftState);
+begin
+  if HasMod(Shift) then
+    ACtrl.SendInput(#27'[' + IntToStr(N) + ';'
+      + IntToStr(XtermModParam(Shift)) + '~')
+  else
+    ACtrl.SendInput(#27'[' + IntToStr(N) + '~');
+end;
+
 procedure TTerminalLCLView.KeyDown(var Key: Word; Shift: TShiftState);
 begin
   inherited KeyDown(Key, Shift);
   if FController = nil then Exit;
 
+  { Shift+Insert is the unconditional paste escape hatch — check before
+    routing Insert to the PTY. Ctrl+Shift+V is handled further down. }
+  if (Key = VK_INSERT) and (Shift = [ssShift]) then
+  begin
+    DoPaste; Key := 0; Exit;
+  end;
+
   case Key of
     VK_RETURN: begin FController.SendKeyEnter; Key := 0; Exit; end;
-    VK_HOME:   begin FController.SendInput(#27'[H'); Key := 0; Exit; end;
-    VK_END:    begin FController.SendInput(#27'[F'); Key := 0; Exit; end;
     VK_BACK:   begin FController.SendKeyBackspace; Key := 0; Exit; end;
     VK_TAB:    begin FController.SendKeyTab(ssShift in Shift); Key := 0; Exit; end;
     VK_ESCAPE: begin FController.SendKeyEscape; Key := 0; Exit; end;
-    VK_UP:     begin FController.SendArrowUp(ssCtrl in Shift); Key := 0; Exit; end;
-    VK_DOWN:   begin FController.SendArrowDown(ssCtrl in Shift); Key := 0; Exit; end;
-    VK_LEFT:   begin FController.SendArrowLeft(ssCtrl in Shift); Key := 0; Exit; end;
-    VK_RIGHT:  begin FController.SendArrowRight(ssCtrl in Shift); Key := 0; Exit; end;
+
+    VK_UP:     begin SendCSIFinal(FController, 'A', Shift); Key := 0; Exit; end;
+    VK_DOWN:   begin SendCSIFinal(FController, 'B', Shift); Key := 0; Exit; end;
+    VK_RIGHT:  begin SendCSIFinal(FController, 'C', Shift); Key := 0; Exit; end;
+    VK_LEFT:   begin SendCSIFinal(FController, 'D', Shift); Key := 0; Exit; end;
+    VK_HOME:   begin SendCSIFinal(FController, 'H', Shift); Key := 0; Exit; end;
+    VK_END:    begin SendCSIFinal(FController, 'F', Shift); Key := 0; Exit; end;
+
+    VK_INSERT: begin SendCSITilde(FController, 2,  Shift); Key := 0; Exit; end;
+    VK_DELETE: begin SendCSITilde(FController, 3,  Shift); Key := 0; Exit; end;
+    VK_PRIOR:  begin SendCSITilde(FController, 5,  Shift); Key := 0; Exit; end;
+    VK_NEXT:   begin SendCSITilde(FController, 6,  Shift); Key := 0; Exit; end;
+
+    VK_F1: begin SendCSIFinal(FController, 'P', Shift, True); Key := 0; Exit; end;
+    VK_F2: begin SendCSIFinal(FController, 'Q', Shift, True); Key := 0; Exit; end;
+    VK_F3: begin SendCSIFinal(FController, 'R', Shift, True); Key := 0; Exit; end;
+    VK_F4: begin SendCSIFinal(FController, 'S', Shift, True); Key := 0; Exit; end;
+    VK_F5:  begin SendCSITilde(FController, 15, Shift); Key := 0; Exit; end;
+    VK_F6:  begin SendCSITilde(FController, 17, Shift); Key := 0; Exit; end;
+    VK_F7:  begin SendCSITilde(FController, 18, Shift); Key := 0; Exit; end;
+    VK_F8:  begin SendCSITilde(FController, 19, Shift); Key := 0; Exit; end;
+    VK_F9:  begin SendCSITilde(FController, 20, Shift); Key := 0; Exit; end;
+    VK_F10: begin SendCSITilde(FController, 21, Shift); Key := 0; Exit; end;
+    VK_F11: begin SendCSITilde(FController, 23, Shift); Key := 0; Exit; end;
+    VK_F12: begin SendCSITilde(FController, 24, Shift); Key := 0; Exit; end;
   end;
 
   { Ctrl+Shift shortcuts. }
@@ -966,12 +1033,6 @@ begin
         end;
       Ord('V'): begin DoPaste; Key := 0; Exit; end;
     end;
-  end;
-
-  { Shift+Insert paste. }
-  if (Shift = [ssShift]) and (Key = VK_INSERT) then
-  begin
-    DoPaste; Key := 0; Exit;
   end;
 
   { Plain Ctrl+letter. }

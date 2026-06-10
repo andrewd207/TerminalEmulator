@@ -971,33 +971,96 @@ begin
   Repaint;
 end;
 
+{ Encode shift/alt/ctrl as the xterm modifyOtherKeys parameter (1..8).
+  Bit 0 = Shift, bit 1 = Alt, bit 2 = Ctrl, then +1. }
+function XtermModParam(shiftstate: TShiftState): Integer;
+begin
+  Result := 1;
+  if ssShift in shiftstate then Inc(Result, 1);
+  if ssAlt   in shiftstate then Inc(Result, 2);
+  if ssCtrl  in shiftstate then Inc(Result, 4);
+end;
+
+function HasMod(shiftstate: TShiftState): Boolean; inline;
+begin
+  Result := [ssCtrl, ssShift, ssAlt] * shiftstate <> [];
+end;
+
+{ Cursor / Home / End / F1-F4 style: CSI <final> or CSI 1;<mod> <final>.
+  F1-F4 normally use SS3 (ESC O P/Q/R/S); with a modifier xterm switches
+  to the CSI form (ESC [1;<mod>P). Pass AUseSS3=True for F1-F4. }
+procedure SendCSIFinal(ACtrl: TTerminalController; AFinal: AnsiChar;
+  shiftstate: TShiftState; AUseSS3: Boolean = False);
+begin
+  if HasMod(shiftstate) then
+    ACtrl.SendInput(#27'[1;' + IntToStr(XtermModParam(shiftstate)) + AFinal)
+  else if AUseSS3 then
+    ACtrl.SendInput(#27'O' + AFinal)
+  else
+    ACtrl.SendInput(#27'[' + AFinal);
+end;
+
+{ Tilde-terminated CSI: CSI <n> ~ or CSI <n> ; <mod> ~. Used for
+  Insert(2), Delete(3), PageUp(5), PageDown(6), F5(15), F6-F12(17-24). }
+procedure SendCSITilde(ACtrl: TTerminalController; N: Integer;
+  shiftstate: TShiftState);
+begin
+  if HasMod(shiftstate) then
+    ACtrl.SendInput(#27'[' + IntToStr(N) + ';'
+      + IntToStr(XtermModParam(shiftstate)) + '~')
+  else
+    ACtrl.SendInput(#27'[' + IntToStr(N) + '~');
+end;
+
 procedure TTerminalFPGUIView.HandleKeyPress(var keycode: word; var shiftstate: TShiftState; var consumed: boolean);
 begin
   inherited HandleKeyPress(keycode, shiftstate, consumed);
   if FController = nil then
     Exit;
 
+  { Shift+Insert is the unconditional paste escape hatch — check before
+    routing Insert to the PTY. Ctrl+Shift+V is handled further down. }
+  if (keycode = keyInsert) and (shiftstate = [ssShift]) then
+  begin
+    DoPaste;
+    consumed := True;
+    Exit;
+  end;
+
   case keycode of
     keyReturn, keyPEnter:
       begin FController.SendKeyEnter; consumed := True; end;
-    keyHome:
-      begin FController.SendInput(#27'[H'); consumed := True; end;
-    keyEnd:
-      begin FController.SendInput(#27'[F'); consumed := True; end;
     keyBackSpace:
       begin FController.SendKeyBackspace; consumed := True; end;
     keyTab:
       begin FController.SendKeyTab(ssShift in shiftstate); consumed := True; end;
     keyEscape:
       begin FController.SendKeyEscape; consumed := True; end;
-    keyUp:
-      begin FController.SendArrowUp(ssCtrl in shiftstate); consumed := True; end;
-    keyDown:
-      begin FController.SendArrowDown(ssCtrl in shiftstate); consumed := True; end;
-    keyLeft:
-      begin FController.SendArrowLeft(ssCtrl in shiftstate); consumed := True; end;
-    keyRight:
-      begin FController.SendArrowRight(ssCtrl in shiftstate); consumed := True; end;
+
+    keyUp:       begin SendCSIFinal(FController, 'A', shiftstate); consumed := True; end;
+    keyDown:     begin SendCSIFinal(FController, 'B', shiftstate); consumed := True; end;
+    keyRight:    begin SendCSIFinal(FController, 'C', shiftstate); consumed := True; end;
+    keyLeft:     begin SendCSIFinal(FController, 'D', shiftstate); consumed := True; end;
+    keyHome:     begin SendCSIFinal(FController, 'H', shiftstate); consumed := True; end;
+    keyEnd:      begin SendCSIFinal(FController, 'F', shiftstate); consumed := True; end;
+
+    keyInsert:   begin SendCSITilde(FController, 2, shiftstate); consumed := True; end;
+    keyDelete:   begin SendCSITilde(FController, 3, shiftstate); consumed := True; end;
+    keyPageUp:   begin SendCSITilde(FController, 5, shiftstate); consumed := True; end;
+    keyPageDown: begin SendCSITilde(FController, 6, shiftstate); consumed := True; end;
+
+    keyF1: begin SendCSIFinal(FController, 'P', shiftstate, True); consumed := True; end;
+    keyF2: begin SendCSIFinal(FController, 'Q', shiftstate, True); consumed := True; end;
+    keyF3: begin SendCSIFinal(FController, 'R', shiftstate, True); consumed := True; end;
+    keyF4: begin SendCSIFinal(FController, 'S', shiftstate, True); consumed := True; end;
+    keyF5:  begin SendCSITilde(FController, 15, shiftstate); consumed := True; end;
+    keyF6:  begin SendCSITilde(FController, 17, shiftstate); consumed := True; end;
+    keyF7:  begin SendCSITilde(FController, 18, shiftstate); consumed := True; end;
+    keyF8:  begin SendCSITilde(FController, 19, shiftstate); consumed := True; end;
+    keyF9:  begin SendCSITilde(FController, 20, shiftstate); consumed := True; end;
+    keyF10: begin SendCSITilde(FController, 21, shiftstate); consumed := True; end;
+    keyF11: begin SendCSITilde(FController, 23, shiftstate); consumed := True; end;
+    keyF12: begin SendCSITilde(FController, 24, shiftstate); consumed := True; end;
   else
     // Ctrl codes Ctrl+c etc
     if ([ssCtrl] = shiftstate) then
@@ -1055,15 +1118,6 @@ begin
           end;
       end;
     end;
-
-    // Shift+Insert (paste)
-    if ([ssShift] = shiftstate) and (keycode = keyInsert) then
-    begin
-      DoPaste;
-      consumed := True;
-      Exit;
-    end;
-
 
     { Printable characters are dispatched via HandleKeyChar, which gives us
       the layout-translated character; we don't synthesise from keycode. }
