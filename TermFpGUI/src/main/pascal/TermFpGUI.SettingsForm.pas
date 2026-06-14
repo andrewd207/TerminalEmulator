@@ -107,6 +107,20 @@ type
     function  ProfileName: string;
   end;
 
+  { Modal dialog to choose a signal source (OSC code / Bell / Title) with an
+    explanation of the common ones. }
+  TSignalPickerForm = class(TfpgForm)
+  private
+    FKindCombo: TfpgComboBox;
+    FCodeEdit: TfpgEdit;
+    procedure OkClick(Sender: TObject);
+    procedure CancelClick(Sender: TObject);
+  public
+    constructor Create(AOwner: TComponent); override;
+    function Kind: TTermSignalKind;        { valid after ShowModal = mrOK }
+    function Code: Integer;
+  end;
+
 { Modifier / lock keys live in $E300..$E386 (see keys.inc). }
 function IsModifierKey(AKey: Word): Boolean; inline;
 begin
@@ -337,6 +351,98 @@ begin
 end;
 
 procedure TProfileEditForm.CancelClick(Sender: TObject);
+begin
+  ModalResult := mrCancel;
+end;
+
+{ TSignalPickerForm }
+
+constructor TSignalPickerForm.Create(AOwner: TComponent);
+var
+  Lbl: TfpgLabel;
+  Btn: TfpgButton;
+begin
+  inherited Create(AOwner);
+  WindowTitle := 'Add Signal';
+  WindowPosition := wpScreenCenter;
+  SetPosition(0, 0, 420, 300);
+  Sizeable := False;
+
+  Lbl := TfpgLabel.Create(Self);
+  Lbl.SetPosition(12, 10, 120, 24);
+  Lbl.Text := 'Signal source:';
+  FKindCombo := TfpgComboBox.Create(Self);
+  FKindCombo.SetPosition(120, 8, 130, 24);
+  FKindCombo.Items.Add('OSC');     { order matches TTermSignalKind }
+  FKindCombo.Items.Add('Bell');
+  FKindCombo.Items.Add('Title');
+  FKindCombo.FocusItem := 0;
+
+  Lbl := TfpgLabel.Create(Self);
+  Lbl.SetPosition(258, 10, 60, 24);
+  Lbl.Text := 'Code:';
+  FCodeEdit := TfpgEdit.Create(Self);
+  FCodeEdit.SetPosition(298, 8, 110, 24);
+  FCodeEdit.Text := '9';
+
+  Lbl := TfpgLabel.Create(Self);
+  Lbl.SetPosition(12, 44, 396, 210);
+  Lbl.WrapText := True;
+  Lbl.Text :=
+    'Run an action when the program emits a terminal signal.' + LineEnding +
+    LineEnding +
+    'Kinds:' + LineEnding +
+    '  OSC <code>  — an OSC escape: ESC ] code ; payload  BEL/ST' + LineEnding +
+    '  Bell        — the terminal bell (Ctrl-G); Code is ignored' + LineEnding +
+    '  Title       — a window-title change (OSC 0/2); Code ignored' + LineEnding +
+    LineEnding +
+    'Common OSC codes:' + LineEnding +
+    '  9    desktop notification (iTerm2) — payload is the message' + LineEnding +
+    '  777  notify — payload is "notify;<title>;<body>"' + LineEnding +
+    '  99   kitty notification protocol' + LineEnding +
+    '  52   clipboard set / query' + LineEnding +
+    LineEnding +
+    'The payload reaches your action as %p (and the code as %c).';
+
+  Btn := TfpgButton.Create(Self);
+  Btn.Text := 'Cancel';
+  Btn.SetPosition(236, 266, 80, 26);
+  Btn.OnClick := @CancelClick;
+  Btn := TfpgButton.Create(Self);
+  Btn.Text := 'OK';
+  Btn.SetPosition(324, 266, 84, 26);
+  Btn.OnClick := @OkClick;
+end;
+
+function TSignalPickerForm.Kind: TTermSignalKind;
+begin
+  case FKindCombo.FocusItem of
+    1: Result := tskBell;
+    2: Result := tskTitle;
+  else
+    Result := tskOSC;
+  end;
+end;
+
+function TSignalPickerForm.Code: Integer;
+begin
+  if Kind = tskOSC then
+    Result := StrToIntDef(Trim(FCodeEdit.Text), -1)
+  else
+    Result := 0;
+end;
+
+procedure TSignalPickerForm.OkClick(Sender: TObject);
+begin
+  if (Kind = tskOSC) and (Code < 0) then
+  begin
+    TfpgMessageDialog.Warning('Add Signal', 'Enter a numeric OSC code (e.g. 9, 52, 99, 777).');
+    Exit;
+  end;
+  ModalResult := mrOK;
+end;
+
+procedure TSignalPickerForm.CancelClick(Sender: TObject);
 begin
   ModalResult := mrCancel;
 end;
@@ -597,20 +703,21 @@ end;
 
 procedure TTermSettingsForm.AddSignalClick(Sender: TObject);
 var
-  V: TfpgString;
+  Frm: TSignalPickerForm;
+  Kind: TTermSignalKind;
   Code: Integer;
   Act: TTermAction;
 begin
-  V := '9';
-  if not fpgInputQuery('Add Signal', 'OSC code (e.g. 9, 52, 99, 777):', V) then Exit;
-  Code := StrToIntDef(Trim(V), -1);
-  if Code < 0 then
-  begin
-    TfpgMessageDialog.Critical('Add Signal', 'That is not a valid OSC code.');
-    Exit;
+  Frm := TSignalPickerForm.Create(nil);
+  try
+    if Frm.ShowModal <> mrOK then Exit;
+    Kind := Frm.Kind;
+    Code := Frm.Code;
+  finally
+    Frm.Free;
   end;
   if not PromptAction(Act) then Exit;
-  FConfig.AddSignal(tskOSC, Code, Act);
+  FConfig.AddSignal(Kind, Code, Act);
   RefreshSignals;
 end;
 
