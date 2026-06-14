@@ -101,6 +101,7 @@ type
     function CellText(const ACell: TTermCell): Utf8String;
     function PickFont(const AAttrs: TTermAttrFlags; ACodePoint: Cardinal): TfpgFontResourceBase;
     procedure PaintCell(const ACanvas: TfpgCanvas; ACol, AViewRow: Integer; const ACell: TTermCell; AHasCursor: Boolean); inline;
+    procedure PaintRowLinks(const ACanvas: TfpgCanvas; AViewRow: Integer; const ALine: TTermCellLine);
     function PixelToCell(X, Y: Integer): TTermCellPos;
     function TryMouseReport(x, y: Integer; shiftstate: TShiftState;
       AButton: TTermMouseButton; APressed, AMotion: Boolean): Boolean;
@@ -802,7 +803,6 @@ var
   S: utf8string;
   VirtualRow: Integer;
   IsSelected: Boolean;
-  LinkX: Integer;
 begin
   if tafWideTrail in ACell.Attrs then
     Exit;
@@ -858,24 +858,56 @@ begin
     ACanvas.DrawLine(R.Left, R.Top + R.Height div 2,
                      R.Right, R.Top + R.Height div 2);
 
-  if ACell.LinkId <> 0 then
+  { A plain SGR underline is drawn per cell (it abuts cleanly across cells).
+    Hyperlink underlines are drawn separately by PaintRowLinks as one coalesced
+    run per link, so the dotted phase stays continuous instead of restarting at
+    every cell boundary. }
+  if (ACell.LinkId = 0) and (tafUnderline in ACell.Attrs) then
+    ACanvas.DrawLine(R.Left, R.Bottom, R.Right, R.Bottom);
+end;
+
+procedure TTerminalFPGUIView.PaintRowLinks(const ACanvas: TfpgCanvas;
+  AViewRow: Integer; const ALine: TTermCellLine);
+{ Draw OSC 8 hyperlink underlines for one row, coalescing adjacent cells that
+  share a link id into a single run.  A run is solid when hovered, otherwise a
+  dotted line whose phase is continuous across the whole run (rather than
+  restarting at each cell, which made the dots look uneven). }
+var
+  Col, RunStart, MaxCol, LId, X, Y, RunRight: Integer;
+begin
+  MaxCol := Min(High(ALine), ColsVisible - 1);
+  Y := AViewRow * FCharHeight + FCharHeight - 1;
+  Col := 0;
+  while Col <= MaxCol do
   begin
-    { Hyperlink takes precedence over a plain SGR underline so links read as
-      links: a clearly dotted underline normally, solid while hovered. }
-    if ACell.LinkId = FHoverLinkId then
-      ACanvas.DrawLine(R.Left, R.Bottom, R.Right, R.Bottom)
+    LId := ALine[Col].LinkId;
+    if LId = 0 then
+    begin
+      Inc(Col);
+      Continue;
+    end;
+
+    { Extend the run over contiguous cells carrying the same link id. }
+    RunStart := Col;
+    while (Col <= MaxCol) and (ALine[Col].LinkId = LId) do
+      Inc(Col);
+    RunRight := Col * FCharWidth - 1;        { right edge of the last run cell }
+
+    { Colour the underline like the link text (first cell of the run). }
+    ACanvas.Color := MapColor(ALine[RunStart].FG, False);
+
+    if LId = FHoverLinkId then
+      ACanvas.DrawLine(RunStart * FCharWidth, Y, RunRight + 1, Y)
     else
     begin
-      LinkX := R.Left;
-      while LinkX < R.Right do
+      X := RunStart * FCharWidth;
+      while X <= RunRight do
       begin
-        ACanvas.FillRectangle(LinkX, R.Bottom, 1, 1);   { 1px dot ... }
-        Inc(LinkX, 3);                                   { ... every 3px }
+        ACanvas.FillRectangle(X, Y, 1, 1);   { 1px dot ... }
+        Inc(X, 3);                            { ... every 3px, continuous phase }
       end;
     end;
-  end
-  else if tafUnderline in ACell.Attrs then
-    ACanvas.DrawLine(R.Left, R.Bottom, R.Right, R.Bottom);
+  end;
 end;
 
 function TTerminalFPGUIView.PixelToCell(X, Y: Integer): TTermCellPos;
@@ -1116,6 +1148,10 @@ begin
           Cell := Line[Col];
           PaintCell(Canvas, Col, Row, Cell, HostsCursor);
         end;
+
+        { Hyperlink underlines drawn after the cells, coalesced per link run so
+          the dotted phase is continuous across cell boundaries. }
+        PaintRowLinks(Canvas, Row, Line);
       end;
 
       if FController.Core.Cursor.Visible and FCursorBlinkVisible then
