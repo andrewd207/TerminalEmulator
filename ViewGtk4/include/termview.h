@@ -56,6 +56,7 @@ typedef struct {
     uint32_t fg_rgb;   /* 0x00RRGGBB or TV_COLOR_DEFAULT */
     uint32_t bg_rgb;
     uint32_t flags;    /* TV_ATTR_* bitmask */
+    uint32_t link_id;  /* OSC 8 hyperlink id; 0 = none. Resolve via tv_hyperlink_uri. */
     char     cluster[16];
 } tv_cell_t;
 
@@ -127,6 +128,11 @@ int  tv_mouse_protocol_active(tv_handle *h);
 char *tv_get_html(tv_handle *h, int kind, const char *title /* or NULL */,
                   int anchor_row, int anchor_col,
                   int focus_row,  int focus_col);
+
+/* Resolve a tv_cell_t.link_id to its OSC 8 URI. Returns a newly allocated
+ * NUL-terminated string (free with tv_str_free), or NULL if link_id is 0 or
+ * unknown. */
+char *tv_hyperlink_uri(tv_handle *h, int link_id);
 
 void  tv_str_free(char *p);
 

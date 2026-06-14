@@ -21,6 +21,16 @@ uses
 
 type
 
+  { OSC 8 hyperlink notifications.  OnLinkHover fires when the mouse enters a
+    link's cells, OnLinkLeave when it leaves (also on mouse-leave).  ALinkId is
+    the internal id, AURI the resolved target. }
+  TTermLinkEvent = procedure(Sender: TObject; ALinkId: Integer;
+    const AURI: string) of object;
+  { Fired on a bare left-click of a link.  Set AHandled := True to suppress the
+    view's default open (via OpenURL). }
+  TTermLinkClickEvent = procedure(Sender: TObject; ALinkId: Integer;
+    const AURI: string; var AHandled: Boolean) of object;
+
   { TTerminalLCLView }
 
   TTerminalLCLView = class(TCustomControl)
@@ -48,6 +58,10 @@ type
     FSelectionBGColor: TColor;
     FOnFontChanged: TNotifyEvent;
     FOnShellExit: TNotifyEvent;
+    FHoverLinkId: Integer;        { OSC 8 link currently under the mouse, 0 = none }
+    FOnLinkHover: TTermLinkEvent;
+    FOnLinkLeave: TTermLinkEvent;
+    FOnLinkClick: TTermLinkClickEvent;
     FYieldRightClickToApp: Boolean;
     FLastMouseReportCol: Integer;
     FLastMouseReportRow: Integer;
@@ -89,6 +103,12 @@ type
     function MapColor(const AColor: TTermColor; IsBackground: Boolean): TColor;
     procedure ApplyFontForCell(const AAttrs: TTermAttrFlags; ACodePoint: Cardinal);
     procedure PaintCell(ACol, AViewRow: Integer; const ACell: TTermCell; AHasCursor: Boolean); inline;
+    procedure PaintRowLinks(AViewRow: Integer; const ALine: TTermCellLine);
+    function LinkIdAt(X, Y: Integer): Integer;
+    function LinkURI(ALinkId: Integer): string;
+    procedure SetHoverLink(ANewLink: Integer);
+    procedure InvalidateLinkRows(ALinkA, ALinkB: Integer);
+    procedure OpenURI(const AURI: string);
     function PixelToCell(X, Y: Integer): TTermCellPos;
     function TryMouseReport(X, Y: Integer; Shift: TShiftState;
       AButton: TTermMouseButton; APressed, AMotion: Boolean): Boolean;
@@ -107,6 +127,7 @@ type
     procedure MouseDown(Button: TMouseButton; Shift: TShiftState; X, Y: Integer); override;
     procedure MouseMove(Shift: TShiftState; X, Y: Integer); override;
     procedure MouseUp(Button: TMouseButton; Shift: TShiftState; X, Y: Integer); override;
+    procedure MouseLeave; override;
     function DoMouseWheel(Shift: TShiftState; WheelDelta: Integer; MousePos: TPoint): Boolean; override;
   public
     constructor Create(AOwner: TComponent); override;
@@ -137,6 +158,9 @@ type
       If unset, the view writes a default banner into the buffer; assigning a
       handler suppresses the default. }
     property OnShellExit: TNotifyEvent read FOnShellExit write FOnShellExit;
+    property OnLinkHover: TTermLinkEvent read FOnLinkHover write FOnLinkHover;
+    property OnLinkLeave: TTermLinkEvent read FOnLinkLeave write FOnLinkLeave;
+    property OnLinkClick: TTermLinkClickEvent read FOnLinkClick write FOnLinkClick;
   published
     property Align;
     property Anchors;
@@ -678,6 +702,130 @@ begin
   end;
 end;
 
+procedure TTerminalLCLView.PaintRowLinks(AViewRow: Integer; const ALine: TTermCellLine);
+{ Draw OSC 8 hyperlink underlines for one row, coalescing adjacent cells that
+  share a link id into a single run: solid when hovered, otherwise a dotted line
+  whose phase is continuous across the run (rather than restarting per cell). }
+var
+  Col, RunStart, MaxCol, LId, X, Y, RunRight: Integer;
+begin
+  MaxCol := Min(High(ALine), ColsVisible - 1);
+  Y := AViewRow * FCharHeight + FCharHeight - 1;
+  Col := 0;
+  while Col <= MaxCol do
+  begin
+    LId := ALine[Col].LinkId;
+    if LId = 0 then
+    begin
+      Inc(Col);
+      Continue;
+    end;
+
+    RunStart := Col;
+    while (Col <= MaxCol) and (ALine[Col].LinkId = LId) do
+      Inc(Col);
+    RunRight := Col * FCharWidth - 1;
+
+    Canvas.Pen.Color := MapColor(ALine[RunStart].FG, False);
+    if LId = FHoverLinkId then
+    begin
+      Canvas.Pen.Style := psSolid;
+      Canvas.Line(RunStart * FCharWidth, Y, RunRight + 1, Y);
+    end
+    else
+    begin
+      X := RunStart * FCharWidth;
+      while X <= RunRight do
+      begin
+        Canvas.Pixels[X, Y] := Canvas.Pen.Color;   { 1px dot every 3px }
+        Inc(X, 3);
+      end;
+    end;
+  end;
+end;
+
+function TTerminalLCLView.LinkIdAt(X, Y: Integer): Integer;
+var
+  P: TTermCellPos;
+  Line: TTermCellLine;
+begin
+  Result := 0;
+  if FController = nil then Exit;
+  P := PixelToCell(X, Y);
+  Line := GetVirtualLine(P.Row);
+  if (P.Col >= 0) and (P.Col < Length(Line)) then
+    Result := Line[P.Col].LinkId;
+end;
+
+function TTerminalLCLView.LinkURI(ALinkId: Integer): string;
+begin
+  if (ALinkId <> 0) and (FController <> nil) then
+    Result := FController.Core.HyperlinkURI(ALinkId)
+  else
+    Result := '';
+end;
+
+procedure TTerminalLCLView.OpenURI(const AURI: string);
+begin
+  if AURI <> '' then
+    OpenURL(AURI);
+end;
+
+procedure TTerminalLCLView.InvalidateLinkRows(ALinkA, ALinkB: Integer);
+{ Repaint only the view rows carrying link id ALinkA or ALinkB. }
+var
+  Row, Col, ViewRows, MinRow, MaxRow, LId: Integer;
+  Line: TTermCellLine;
+  R: TRect;
+begin
+  if FController = nil then Exit;
+  if (ALinkA = 0) and (ALinkB = 0) then Exit;
+
+  ViewRows := RowsVisible;
+  MinRow := MaxInt;
+  MaxRow := -1;
+  for Row := 0 to ViewRows - 1 do
+  begin
+    Line := GetVirtualLine(FTopRow + Row);
+    for Col := 0 to High(Line) do
+    begin
+      LId := Line[Col].LinkId;
+      if (LId <> 0) and ((LId = ALinkA) or (LId = ALinkB)) then
+      begin
+        if Row < MinRow then MinRow := Row;
+        if Row > MaxRow then MaxRow := Row;
+        Break;
+      end;
+    end;
+  end;
+  if MaxRow < 0 then Exit;
+
+  R := Rect(0, MinRow * FCharHeight, GridWidth, (MaxRow + 1) * FCharHeight + 1);
+  if HandleAllocated then
+    InvalidateRect(Handle, @R, False);
+end;
+
+procedure TTerminalLCLView.SetHoverLink(ANewLink: Integer);
+{ View-only overlay: cell data is never touched; repaint only the old/new
+  link's rows so moving on/off a link is a cheap dirty-line refresh. }
+var
+  OldLink: Integer;
+begin
+  if ANewLink = FHoverLinkId then Exit;
+  OldLink := FHoverLinkId;
+  FHoverLinkId := ANewLink;
+  if ANewLink <> 0 then
+    Cursor := crHandPoint
+  else
+    Cursor := crDefault;
+  InvalidateLinkRows(OldLink, ANewLink);
+
+  if (OldLink <> 0) and Assigned(FOnLinkLeave) then
+    FOnLinkLeave(Self, OldLink, LinkURI(OldLink));
+  if (ANewLink <> 0) and Assigned(FOnLinkHover) then
+    FOnLinkHover(Self, ANewLink, LinkURI(ANewLink));
+end;
+
 function TTerminalLCLView.PixelToCell(X, Y: Integer): TTermCellPos;
 begin
   if FCharWidth <= 0 then FCharWidth := 1;
@@ -897,6 +1045,8 @@ begin
       Cell := Line[Col];
       PaintCell(Col, Row, Cell, HostsCursor);
     end;
+    { Hyperlink underlines after the cells, coalesced per link run. }
+    PaintRowLinks(Row, Line);
   end;
 
   if FController.Core.Cursor.Visible and FCursorBlinkVisible
@@ -1153,6 +1303,14 @@ var
 begin
   inherited MouseMove(Shift, X, Y);
 
+  { Hyperlink hover is a non-destructive visual highlight (hand cursor + solid
+    underline, dirty-line repaint).  Do it on every button-less motion REGARDLESS
+    of mouse mode — like VTE/gnome-terminal, which keep highlighting links even
+    while a full-screen app has mouse tracking on.  It doesn't consume the event,
+    so motion is still reported below. }
+  if (Shift * [ssLeft, ssMiddle, ssRight]) = [] then
+    SetHoverLink(LinkIdAt(X, Y));
+
   if (FController <> nil) and (FController.Core.MouseProtocol <> tmpNone)
      and not (ssShift in Shift) then
   begin
@@ -1193,7 +1351,11 @@ begin
 end;
 
 procedure TTerminalLCLView.MouseUp(Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
-var TermBtn: TTermMouseButton;
+var
+  TermBtn: TTermMouseButton;
+  LId: Integer;
+  LUri: string;
+  LHandled: Boolean;
 begin
   inherited MouseUp(Button, Shift, X, Y);
   case Button of
@@ -1209,6 +1371,24 @@ begin
   if TryMouseReport(X, Y, Shift, TermBtn, False, False) then Exit;
   if Button <> mbLeft then Exit;
 
+  { A bare click (no drag selection) on a hyperlink opens it.  Embedders can
+    intercept via OnLinkClick and set AHandled to override the default. }
+  if not FSelection.Selecting then
+  begin
+    LId := LinkIdAt(X, Y);
+    if LId <> 0 then
+    begin
+      LUri := LinkURI(LId);
+      LHandled := False;
+      if Assigned(FOnLinkClick) then
+        FOnLinkClick(Self, LId, LUri, LHandled);
+      if not LHandled then
+        OpenURI(LUri);
+      FMouseDownPending := False;
+      Exit;
+    end;
+  end;
+
   FMouseDownPending := False;
   if FSelection.Active and FSelection.Selecting then
   begin
@@ -1216,6 +1396,14 @@ begin
     FSelection.Selecting := False;
     Invalidate;
   end;
+end;
+
+procedure TTerminalLCLView.MouseLeave;
+begin
+  inherited MouseLeave;
+  { Pointer left the control — drop any hover so the solid line reverts to
+    dotted and the hand cursor clears. }
+  SetHoverLink(0);
 end;
 
 function TTerminalLCLView.DoMouseWheel(Shift: TShiftState; WheelDelta: Integer;

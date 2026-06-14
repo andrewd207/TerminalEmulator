@@ -57,6 +57,10 @@ struct _TermViewWidget {
     int              last_report_col;
     int              last_report_row;
 
+    /* OSC 8 hyperlink currently under the mouse (0 = none). View-only overlay;
+       cell data is never modified. */
+    int              hover_link_id;
+
     /* Popover. */
     GtkWidget       *popover;
     GtkWidget       *mi_copy;
@@ -341,6 +345,39 @@ static void term_view_widget_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) 
             set_cairo_color(cr, fg);
             cairo_move_to(cr, x, y);
             pango_cairo_show_layout(cr, layout);
+        }
+
+        /* Hyperlink underlines, drawn after the row's cells and coalesced per
+           link run so the dotted phase stays continuous across cell boundaries:
+           solid while hovered, otherwise a continuous dotted line. */
+        int ly = row * self->char_h + self->char_h - 1;
+        int lc = 0;
+        while (lc <= last_col) {
+            tv_cell_t lcell;
+            if (!tv_get_cell(self->tv, v_row, lc, &lcell) || lcell.link_id == 0) {
+                ++lc;
+                continue;
+            }
+            uint32_t lid = lcell.link_id;
+            int run_start = lc;
+            set_cairo_color(cr, cell_fg(lcell.fg_rgb));
+            while (lc <= last_col) {
+                tv_cell_t c2;
+                if (!tv_get_cell(self->tv, v_row, lc, &c2) || c2.link_id != lid) break;
+                ++lc;
+            }
+            int lx0 = run_start * self->char_w;
+            int lx1 = lc * self->char_w;          /* exclusive right edge */
+            if ((int)lid == self->hover_link_id) {
+                cairo_set_line_width(cr, 1.0);
+                cairo_move_to(cr, lx0, ly + 0.5);
+                cairo_line_to(cr, lx1, ly + 0.5);
+                cairo_stroke(cr);
+            } else {
+                for (int px = lx0; px < lx1; px += 3)  /* 1px dot every 3px */
+                    cairo_rectangle(cr, px, ly, 1, 1);
+                cairo_fill(cr);
+            }
         }
     }
 
@@ -707,6 +744,34 @@ static void show_popover_at(TermViewWidget *self, double x, double y) {
 /* Mouse                                                              */
 /* ------------------------------------------------------------------ */
 
+/* OSC 8 link id under a pixel (0 = none). */
+static int link_id_at(TermViewWidget *self, double x, double y) {
+    if (!self->tv) return 0;
+    TermCellPos p = pixel_to_cell(self, x, y);
+    tv_cell_t cell;
+    if (!tv_get_cell(self->tv, p.row, p.col, &cell)) return 0;
+    return (int)cell.link_id;
+}
+
+/* Update which link is highlighted (hand cursor + solid underline). Non-
+   destructive: only a view overlay, so we just queue a redraw on change. */
+static void set_hover_link(TermViewWidget *self, int new_id) {
+    if (new_id == self->hover_link_id) return;
+    self->hover_link_id = new_id;
+    gtk_widget_set_cursor_from_name(GTK_WIDGET(self),
+                                    new_id != 0 ? "pointer" : NULL);
+    gtk_widget_queue_draw(GTK_WIDGET(self));
+}
+
+static void open_link_uri(TermViewWidget *self, int link_id) {
+    if (!self->tv || link_id == 0) return;
+    char *uri = tv_hyperlink_uri(self->tv, link_id);
+    if (uri) {
+        g_app_info_launch_default_for_uri(uri, NULL, NULL);
+        tv_str_free(uri);
+    }
+}
+
 static gboolean try_mouse_report(TermViewWidget *self, double x, double y,
                                  int button, int pressed, int motion,
                                  GdkModifierType state) {
@@ -778,6 +843,14 @@ static void on_motion(GtkEventControllerMotion *m, double x, double y, gpointer 
     if      (state & GDK_BUTTON1_MASK) btn = TV_MOUSE_LEFT;
     else if (state & GDK_BUTTON2_MASK) btn = TV_MOUSE_MIDDLE;
     else if (state & GDK_BUTTON3_MASK) btn = TV_MOUSE_RIGHT;
+
+    /* Hyperlink hover is a non-destructive visual highlight: do it on every
+       button-less motion REGARDLESS of mouse mode (like VTE/gnome-terminal,
+       which keep highlighting links while an app has mouse tracking on). It
+       doesn't consume the event, so motion is still reported below. */
+    if (btn < 0)
+        set_hover_link(self, link_id_at(self, x, y));
+
     if (tv_mouse_protocol_active(self->tv) && !(state & GDK_SHIFT_MASK)) {
         if (btn >= 0) try_mouse_report(self, x, y, btn, 1, 1, state);
         return;
@@ -800,6 +873,13 @@ static void on_motion(GtkEventControllerMotion *m, double x, double y, gpointer 
     }
 }
 
+static void on_motion_leave(GtkEventControllerMotion *m G_GNUC_UNUSED, gpointer ud) {
+    TermViewWidget *self = TERM_VIEW_WIDGET(ud);
+    /* Pointer left the widget — drop hover so the solid line reverts to dotted
+       and the hand cursor clears. */
+    set_hover_link(self, 0);
+}
+
 static void on_click_released(GtkGestureClick *gesture, int n_press G_GNUC_UNUSED,
                               double x, double y, gpointer ud) {
     TermViewWidget *self = TERM_VIEW_WIDGET(ud);
@@ -815,6 +895,18 @@ static void on_click_released(GtkGestureClick *gesture, int n_press G_GNUC_UNUSE
               :  TV_MOUSE_LEFT;
     if (try_mouse_report(self, x, y, tv_btn, 0, 0, state)) return;
     if (btn != GDK_BUTTON_PRIMARY) return;
+
+    /* Bare click (no drag) on a hyperlink opens it. In mouse-mode apps the
+       click was already reported above and consumed, so this only fires in
+       normal contexts (a shell printing an OSC 8 link). */
+    if (!self->sel_dragging) {
+        int lid = link_id_at(self, x, y);
+        if (lid != 0) {
+            open_link_uri(self, lid);
+            self->sel_pending = FALSE;
+            return;
+        }
+    }
 
     self->sel_pending = FALSE;
     if (self->sel_active && self->sel_dragging) {
@@ -1173,6 +1265,7 @@ static void term_view_widget_init(TermViewWidget *self) {
 
     GtkEventController *motion = gtk_event_controller_motion_new();
     g_signal_connect(motion, "motion", G_CALLBACK(on_motion), self);
+    g_signal_connect(motion, "leave",  G_CALLBACK(on_motion_leave), self);
     gtk_widget_add_controller(GTK_WIDGET(self), motion);
 
     GtkEventController *scroll =

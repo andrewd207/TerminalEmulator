@@ -59,6 +59,7 @@ type
     fg_rgb:    cuint32;
     bg_rgb:    cuint32;
     flags:     cuint32;
+    link_id:   cuint32;   { OSC 8 hyperlink id; 0 = none. Resolve via tv_hyperlink_uri. }
     cluster:   array[0..15] of cchar;
   end;
   ptv_cell = ^tv_cell_t;
@@ -192,6 +193,7 @@ begin
   Dest.fg_rgb    := MapColor(Src.FG, False);
   Dest.bg_rgb    := MapColor(Src.BG, True);
   Dest.flags     := MapAttrs(Src.Attrs);
+  Dest.link_id   := cuint32(Src.LinkId);
   if Src.Cluster <> '' then
   begin
     N := Length(Src.Cluster);
@@ -408,6 +410,19 @@ begin
   if p <> nil then StrDispose(p);
 end;
 
+{ Resolve an OSC 8 link id (from tv_cell_t.link_id) to its URI. Returns a
+  heap string the caller must free with tv_str_free, or NULL if unknown. }
+function tv_hyperlink_uri(h: PTvHandle; link_id: cint): PAnsiChar; cdecl;
+var
+  URI: string;
+begin
+  Result := nil;
+  if (h = nil) or (link_id = 0) then Exit;
+  URI := h^.Ctrl.Core.HyperlinkURI(link_id);
+  if URI <> '' then
+    Result := CopyStr(URI);
+end;
+
 { Callback registration. Pass NULL to unset. }
 
 procedure tv_set_user_data(h: PTvHandle; user: Pointer); cdecl;
@@ -441,7 +456,7 @@ exports
   tv_bracketed_paste, tv_is_running, tv_subprocess_running,
   tv_line_wrapped, tv_line_length, tv_get_cell,
   tv_mouse_protocol_active,
-  tv_get_html, tv_str_free,
+  tv_get_html, tv_hyperlink_uri, tv_str_free,
   tv_set_user_data,
   tv_set_on_invalidate, tv_set_on_bell, tv_set_on_title, tv_set_on_exit,
   tv_set_on_clipboard_set, tv_set_on_clipboard_get;
