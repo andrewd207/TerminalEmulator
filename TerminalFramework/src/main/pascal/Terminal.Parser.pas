@@ -45,6 +45,13 @@ type
   TTermUnknownCSIEvent = procedure(Sender: TObject; const APrivateMarker: AnsiChar;
     const AIntermediates: string; const AFinal: AnsiChar; const AParams: TIntegerArray) of object;
   TTermUnknownESCEvent = procedure(Sender: TObject; const AIntermediates: string; const AFinal: AnsiChar) of object;
+  { Generic OSC passthrough.  Fires for EVERY OSC code, before the parser's own
+    built-in handling, so embedders can attach their own "signals" —
+    notifications, custom app protocols — and can also override the built-ins
+    (0/2 title, 52 clipboard).  Set AHandled := True to consume the sequence and
+    suppress the built-in treatment; leave it False to fall through. }
+  TTermOSCEvent = procedure(Sender: TObject; ACode: Integer;
+    const APayload: RawByteString; var AHandled: Boolean) of object;
 
   TTerminalParser = class
   private
@@ -65,6 +72,7 @@ type
     FOnDCS: TTermDCSHandler;
     FOnUnknownCSI: TTermUnknownCSIEvent;
     FOnUnknownESC: TTermUnknownESCEvent;
+    FOnOSC: TTermOSCEvent;
     procedure EnterGround;
     procedure ClearSequenceState;
     procedure CollectIntermediate(B: Byte);
@@ -86,6 +94,7 @@ type
     procedure DispatchSGR;
     procedure DispatchOSC(const AText: RawByteString);
     procedure HandleOSC52(const APayload: RawByteString);
+    procedure HandleOSC8(const APayload: RawByteString);
     procedure DispatchDCS;
     procedure AppendOSCByte(B: Byte);
     procedure AppendDCSByte(B: Byte);
@@ -108,6 +117,7 @@ type
     property OnDCS: TTermDCSHandler read FOnDCS write FOnDCS;
     property OnUnknownCSI: TTermUnknownCSIEvent read FOnUnknownCSI write FOnUnknownCSI;
     property OnUnknownESC: TTermUnknownESCEvent read FOnUnknownESC write FOnUnknownESC;
+    property OnOSC: TTermOSCEvent read FOnOSC write FOnOSC;
   end;
 
 implementation
@@ -475,6 +485,7 @@ var
   SepPos: SizeInt;
   CodeText, Payload: RawByteString;
   Code: Integer;
+  Handled: Boolean;
 begin
   SepPos := Pos(';', string(AText));
   if SepPos > 0 then
@@ -489,10 +500,35 @@ begin
   end;
 
   Code := StrToIntDef(string(CodeText), -1);
+
+  { The embedder's generic OSC seam gets first refusal on EVERY code — even the
+    ones with built-in handling (0/2 title, 52 clipboard) — so a signal binding
+    can override them.  If the handler sets Handled, we skip the built-in. }
+  Handled := False;
+  if Assigned(FOnOSC) then
+    FOnOSC(Self, Code, Payload, Handled);
+  if Handled then
+    Exit;
+
   case Code of
     0, 2: FCore.SetWindowTitle(string(Payload));
+    8:    HandleOSC8(Payload);
     52:   HandleOSC52(Payload);
   end;
+end;
+
+procedure TTerminalParser.HandleOSC8(const APayload: RawByteString);
+var
+  SemiPos: SizeInt;
+  URI: RawByteString;
+begin
+  { OSC 8 ; params ; URI  — an empty URI (e.g. "8;;") closes the link. }
+  SemiPos := Pos(';', string(APayload));
+  if SemiPos > 0 then
+    URI := Copy(APayload, SemiPos + 1, Length(APayload) - SemiPos)
+  else
+    URI := '';
+  FCore.SetHyperlink(string(URI));
 end;
 
 procedure TTerminalParser.HandleOSC52(const APayload: RawByteString);
@@ -723,7 +759,13 @@ begin
       end;
     'h': CSISetMode(True);
     'l': CSISetMode(False);
-    'm': DispatchSGR;
+    'm':
+      { SGR only applies with no private marker.  CSI > Pp m (xterm
+        modifyOtherKeys) and CSI ? ... m are NOT colour/attribute changes —
+        treating them as SGR turned "[>4m" into "underline on" and smeared it
+        across everything a TUI drew. }
+      if FPrivateMarker = #0 then
+        DispatchSGR;
     'n':
       case ParamValue(0, 0) of
         6: EmitCPR;

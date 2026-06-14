@@ -138,6 +138,10 @@ begin
     EnvList.Values['TERM'] := FTermName;
     EnvList.Values['COLORTERM'] := 'truecolor';
     EnvList.Values['TERM_PROGRAM'] := FTermProgram;
+    { We support OSC 8 hyperlinks — advertise it so capability-detecting CLIs
+      (Claude Code and other Node apps via the `supports-hyperlinks` lib) emit
+      them.  Without this they print bare paths on an unknown TERM. }
+    EnvList.Values['FORCE_HYPERLINK'] := '1';
 
     GetMem(Result, SizeOf(PChar) * (EnvList.Count + 1));
     FillChar(Result^, SizeOf(PChar) * (EnvList.Count + 1), 0);

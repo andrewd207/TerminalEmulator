@@ -66,6 +66,7 @@ type
     Attrs: TTermAttrFlags;
     FG: TTermColor;
     BG: TTermColor;
+    LinkId: Integer;            { OSC 8 hyperlink id; 0 = none }
 
     class operator Initialize(var ADest: TTermCell);
     class operator Finalize(var ADest: TTermCell);
@@ -183,6 +184,7 @@ type
     Attrs: TTermAttrFlags;
     FG: TTermColor;
     BG: TTermColor;
+    LinkId: Integer;            { active OSC 8 hyperlink stamped onto new cells }
   end;
 
   TTermRect = record
@@ -280,6 +282,7 @@ type
     FDbgCounter: Integer;
     FTrapTail: string;
     FTrapFired: Boolean;
+    FLinks: TStringList;          { OSC 8 hyperlink targets; index = id-1 }
     function ActiveBuffer: TTermScreenBuffer;
     function MakeBlankCell: TTermCell;
     procedure ClampCursor;
@@ -309,6 +312,10 @@ type
     procedure CheckSyncTimeout;
     procedure DbgRecord(const ALine: string);
     procedure DbgDump;
+
+    { OSC 8 hyperlinks. SetHyperlink('') closes the current link. }
+    procedure SetHyperlink(const AURI: string);
+    function  HyperlinkURI(AId: Integer): string;
 
     procedure SetCursorPos(ACol, ARow: Integer);
     procedure MoveCursor(ADeltaCol, ADeltaRow: Integer);
@@ -541,6 +548,7 @@ begin
   Result.Attrs := APen.Attrs;
   Result.FG := APen.FG;
   Result.BG := APen.BG;
+  Result.LinkId := APen.LinkId;
 end;
 
 { TTermCell }
@@ -566,6 +574,7 @@ begin
   ADest.Attrs := [];
   ADest.FG := TermDefaultColorFG;
   ADest.BG := TermDefaultColorBG;
+  ADest.LinkId := 0;
 end;
 
 class operator TTermCell.Finalize(var ADest: TTermCell);
@@ -586,6 +595,7 @@ begin
   ADest.Attrs := ASrc.Attrs;
   ADest.FG := ASrc.FG;
   ADest.BG := ASrc.BG;
+  ADest.LinkId := ASrc.LinkId;
 end;
 
 
@@ -1240,15 +1250,42 @@ begin
   FAltBuffer.Anchor := abTop;
   FUseAltBuffer := False;
 
+  FLinks := TStringList.Create;
+
   SetLength(FTabStops, FCols);
   Reset;
 end;
 
 destructor TTerminalCore.Destroy;
 begin
+  FLinks.Free;
   FAltBuffer.Free;
   FMainBuffer.Free;
   inherited Destroy;
+end;
+
+procedure TTerminalCore.SetHyperlink(const AURI: string);
+var
+  Idx: Integer;
+begin
+  if AURI = '' then
+  begin
+    FPen.LinkId := 0;
+    Exit;
+  end;
+  { Dedupe so the same URI across wrapped lines shares one id (and one hover). }
+  Idx := FLinks.IndexOf(AURI);
+  if Idx < 0 then
+    Idx := FLinks.Add(AURI);
+  FPen.LinkId := Idx + 1;          { id is 1-based; 0 means "no link" }
+end;
+
+function TTerminalCore.HyperlinkURI(AId: Integer): string;
+begin
+  if (AId >= 1) and (AId <= FLinks.Count) then
+    Result := FLinks[AId - 1]
+  else
+    Result := '';
 end;
 
 function TTerminalCore.CellAt(ACol, ARow: Integer): PTermCell;
@@ -1501,6 +1538,9 @@ end;
 procedure TTerminalCore.ClearCell(var ACell: TTermCell);
 begin
   ACell := MakeBlankCell;
+  ACell.LinkId := 0;     { erased cells keep the pen's bg (BCE) but are never
+                           part of a hyperlink — otherwise an open OSC 8 link
+                           smears across every line a TUI redraws }
 end;
 
 procedure TTerminalCore.CopyCell(const ASource: TTermCell; var ADest: TTermCell);
@@ -1673,12 +1713,15 @@ begin
   if not FUseAltBuffer then
     Exit;
   FUseAltBuffer := False;
+  FPen.LinkId := 0;     { an OSC 8 link left open by a TUI must not bleed into
+                          the main buffer (shell prompt) }
   MarkAllDirty;
 end;
 
 procedure TTerminalCore.SwitchToAltBuffer(AClear: Boolean);
 begin
   FUseAltBuffer := True;
+  FPen.LinkId := 0;     { start the alt screen with no inherited link }
   if AClear then
     FAltBuffer.Clear;
   MarkAllDirty;

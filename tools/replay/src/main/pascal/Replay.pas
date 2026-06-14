@@ -71,9 +71,11 @@ end;
 procedure DumpBuffer(const ATag: string);
 var
   R, C: Integer;
-  Line: string;
+  Line, Attr: string;
   Cell: PTermCell;
-  Ch: string;
+  Ch, A: string;
+  HasAttr: Boolean;
+  LinkIds: string;
 begin
   Inc(GFrame);
   WriteLn(GOut, '');
@@ -82,9 +84,12 @@ begin
     '  alt=', GCore.InAltBuffer,
     '  cursor=(', GCore.Cursor.Row, ',', GCore.Cursor.Col, ')',
     ' =====');
+  LinkIds := '';
   for R := 0 to GCore.Rows - 1 do
   begin
     Line := Format('%2d| ', [R]);
+    Attr := '    ';
+    HasAttr := False;
     for C := 0 to GCore.Cols - 1 do
     begin
       Cell := GCore.CellAt(C, R);
@@ -95,9 +100,31 @@ begin
       else
         Ch := UTF8Encode(WideChar(Cell^.CodePoint));
       Line := Line + Ch;
+      { Attribute marker: L=link, _=underline, f=faint, b=bold, i=italic. }
+      A := ' ';
+      if (Cell <> nil) then
+      begin
+        if Cell^.LinkId <> 0 then
+        begin
+          A := 'L';
+          if Pos('= ' + IntToStr(Cell^.LinkId) + ' ', LinkIds) = 0 then
+            LinkIds := LinkIds + Format('  link %d = "%s"'#10,
+              [Cell^.LinkId, GCore.HyperlinkURI(Cell^.LinkId)]);
+        end
+        else if tafUnderline in Cell^.Attrs then A := '_'
+        else if tafFaint in Cell^.Attrs then A := 'f'
+        else if tafBold in Cell^.Attrs then A := 'b'
+        else if tafItalic in Cell^.Attrs then A := 'i';
+      end;
+      if A <> ' ' then HasAttr := True;
+      Attr := Attr + A;
     end;
     WriteLn(GOut, Line, '|');
+    if HasAttr then
+      WriteLn(GOut, Attr, '|   <- attrs (L=link, _=underline)');
   end;
+  if LinkIds <> '' then
+    WriteLn(GOut, 'links this frame:'#10, LinkIds);
   Flush(GOut);
 end;
 

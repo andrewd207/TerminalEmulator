@@ -15,6 +15,7 @@
     <module>ViewLCL</module>
     <module>ExampleTerminal</module>
     <module>ExampleTerminalLCL</module>
+    <module>TermFpGUI</module>
     <module>tools/replay</module>
   </modules>
 

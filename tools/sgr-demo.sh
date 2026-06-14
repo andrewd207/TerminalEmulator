@@ -5,6 +5,10 @@
 E=$'\e'
 CSI="${E}["
 R="${CSI}0m"
+ST="${E}\\"               # string terminator for OSC
+
+# osc8 TEXT URI  -> emit an OSC 8 hyperlink
+osc8() { printf '%s]8;;%s%s%s%s]8;;%s' "$E" "$2" "$ST" "$1" "$E" "$ST"; }
 
 echo
 echo "=== Basic attributes ==="
@@ -56,6 +60,14 @@ printf 'before%s' "${CSI}s"     # save
 printf '%s' "${CSI}10C[+10 cols]"
 printf '%sback' "${CSI}u"        # restore
 echo
+echo
+
+echo
+echo "=== OSC 8 hyperlinks (hover -> solid underline, click to open) ==="
+printf 'plain link: '; osc8 'Anthropic' 'https://www.anthropic.com'; echo
+printf 'styled    : '; printf '%s' "${CSI}1;34m"; osc8 'Claude Code docs' 'https://docs.claude.com/en/docs/claude-code'; printf '%s' "$R"; echo
+printf 'two links : '; osc8 'example.com' 'https://example.com'; printf '   '; osc8 'GitHub' 'https://github.com'; echo
+printf 'file URI  : '; osc8 '/etc/hostname' 'file:///etc/hostname'; echo
 echo
 
 echo "=== Done. ==="

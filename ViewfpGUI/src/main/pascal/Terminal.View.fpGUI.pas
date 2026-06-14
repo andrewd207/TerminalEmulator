@@ -20,6 +20,23 @@ uses
 
 type
 
+  { Lets an embedder claim a key chord before the view's built-in handling.
+    Set AHandled := True to consume it (e.g. the app ran a bound action). }
+  TTermViewKeyEvent = procedure(Sender: TObject; AKeyCode: Word;
+    AShift: TShiftState; var AHandled: Boolean) of object;
+
+  { OSC 8 hyperlink notifications.  The view fires OnLinkHover when the mouse
+    enters a link's cells and OnLinkLeave when it leaves them (also on widget
+    exit).  ALinkId is the internal id, AURI the resolved target. }
+  TTermLinkEvent = procedure(Sender: TObject; ALinkId: Integer;
+    const AURI: string) of object;
+
+  { Fired on a bare left-click of a hyperlink.  Set AHandled := True to suppress
+    the view's default behaviour (open via xdg-open) — e.g. the embedder/settings
+    routed the click to a custom action. }
+  TTermLinkClickEvent = procedure(Sender: TObject; ALinkId: Integer;
+    const AURI: string; var AHandled: Boolean) of object;
+
   { TTerminalFPGUIView }
 
   TTerminalFPGUIView = class(TfpgWidget)
@@ -38,12 +55,17 @@ type
     FCharHeight: Integer;
     FTopRow: Integer;
     FCursorBlinkVisible: Boolean;
+    FHoverLinkId: Integer;        { OSC 8 link currently under the mouse, 0 = none }
     FDefaultFGColor: TfpgColor;
     FSelection: TTermSelection;
     FSelectionFGColor: TfpgColor;
     FSelectionBGColor: TfpgColor;
     FOnFontChanged: TNotifyEvent;
     FOnShellExit: TNotifyEvent;
+    FOnKeyAction: TTermViewKeyEvent;
+    FOnLinkHover: TTermLinkEvent;
+    FOnLinkLeave: TTermLinkEvent;
+    FOnLinkClick: TTermLinkClickEvent;
     FYieldRightClickToApp: Boolean;
     FLastMouseReportCol: Integer;
     FLastMouseReportRow: Integer;
@@ -89,6 +111,11 @@ type
     procedure DoPaste;
     procedure DoChangeFont;
     procedure DoChangeEmojiFont;
+    function  LinkIdAt(X, Y: Integer): Integer;
+    function  LinkURI(ALinkId: Integer): string;
+    procedure OpenURI(const AURI: string);
+    procedure SetHoverLink(ANewLink: Integer);
+    procedure InvalidateLinkRows(ALinkA, ALinkB: Integer);
   protected
     procedure HandlePaint; override;
     procedure HandleResize(AWidth, AHeight: TfpgCoord); override;
@@ -96,6 +123,7 @@ type
     procedure HandleKeyChar(var AText: TfpgChar; var shiftstate: TShiftState; var consumed: boolean); override;
     procedure HandleLMouseDown(x, y: integer; shiftstate: TShiftState); override;
     procedure HandleMouseMove(x, y: integer; btnstate: word; shiftstate: TShiftState);  override;
+    procedure HandleMouseExit; override;
     procedure HandleLMouseUp(x, y: integer; shiftstate: TShiftState); override;
     procedure HandleRMouseDown(x, y: integer; shiftstate: TShiftState); override;
     procedure HandleShow; override;
@@ -105,7 +133,9 @@ type
     destructor Destroy; override;
 
     procedure AttachController(AController: TTerminalController);
-    procedure DetachController;
+    { AStopController=False detaches without killing the PTY child, so the
+      live session can be handed to another view (e.g. moved to a new window). }
+    procedure DetachController(AStopController: Boolean = True);
     procedure StartShell(const AShell: string = '');
     procedure ScrollBy(ADeltaRows: Integer);
 
@@ -113,6 +143,23 @@ type
     property FontDesc: string read FFontDesc write FFontDesc;
     property EmojiFontDesc: string read FEmojiFontDesc write FEmojiFontDesc;
     property CursorStyle: TCursorStyle read FCursorStyle write FCursorStyle;
+    { Default fg/bg used when a cell carries the terminal's default colour.
+      Profiles set these; call Invalidate after changing to repaint. }
+    property DefaultFGColor: TfpgColor read FDefaultFGColor write FDefaultFGColor;
+    property DefaultBGColor: TfpgColor read FBackgroundColor write FBackgroundColor;
+    { Copy/paste exposed so an app keymap can bind them to configurable chords.
+      CopySelection only copies when there is a selection (returns whether it
+      did), so a "smart Ctrl+C" can fall through to SIGINT when nothing is
+      selected. }
+    function  HasSelection: Boolean;
+    function  CopySelection: Boolean;
+    procedure PasteClipboard;
+    { Fired at the top of key handling; assign to let the app's keybindings
+      claim a chord before the view's defaults. }
+    property OnKeyAction: TTermViewKeyEvent read FOnKeyAction write FOnKeyAction;
+    property OnLinkHover: TTermLinkEvent read FOnLinkHover write FOnLinkHover;
+    property OnLinkLeave: TTermLinkEvent read FOnLinkLeave write FOnLinkLeave;
+    property OnLinkClick: TTermLinkClickEvent read FOnLinkClick write FOnLinkClick;
     { When True, right-click is forwarded to a mouse-capturing app (?1000/?1003)
       instead of opening the context menu. When False (default) the context
       menu always opens on right-click, even in fullscreen TUIs. }
@@ -136,7 +183,7 @@ type
 implementation
 
 uses
-  Math;
+  Math, process;
 
 
 const
@@ -217,7 +264,7 @@ begin
   Repaint;
 end;
 
-procedure TTerminalFPGUIView.DetachController;
+procedure TTerminalFPGUIView.DetachController(AStopController: Boolean = True);
 begin
   if FController <> nil then
   begin
@@ -226,7 +273,8 @@ begin
     FController.Core.OnTitle := nil;
     FController.Core.OnClipboardSet := nil;
     FController.Core.OnClipboardGet := nil;
-    FController.Stop;
+    if AStopController then
+      FController.Stop;
     FController := nil; // Not managed by the view. it's 'attached' here. So don't free.
   end;
   FTimer.Enabled := False;
@@ -454,6 +502,11 @@ begin
   if FController = nil then
     Exit;
 
+  { In the alternate screen buffer the app manages its own scrolling, so there
+    is no scrollback to show — hide the bar.  The grid width is unchanged (the
+    column is always reserved), so this is purely visual: no resize. }
+  FScrollBar.Visible := not FController.Core.InAltBuffer;
+
   VisibleCount := Max(1, RowsVisible);
   TotalRows := FController.Core.HistoryCount + FController.Core.Rows;
 
@@ -485,6 +538,125 @@ end;
 procedure TTerminalFPGUIView.DoCopy;
 begin
   fpgClipboard.Text:= GetSelectedTextUTF8;
+end;
+
+function TTerminalFPGUIView.HasSelection: Boolean;
+begin
+  Result := FSelection.Active and FSelection.Selecting;
+end;
+
+function TTerminalFPGUIView.LinkIdAt(X, Y: Integer): Integer;
+var
+  P: TTermCellPos;
+  Line: TTermCellLine;
+begin
+  Result := 0;
+  if FController = nil then Exit;
+  P := PixelToCell(X, Y);
+  Line := GetVirtualLine(P.Row);
+  if (P.Col >= 0) and (P.Col < Length(Line)) then
+    Result := Line[P.Col].LinkId;
+end;
+
+procedure TTerminalFPGUIView.InvalidateLinkRows(ALinkA, ALinkB: Integer);
+{ Repaint only the view rows that carry link id ALinkA or ALinkB.  Used by the
+  hover machinery so toggling a link between dotted and solid touches just the
+  affected lines instead of the whole grid.  Link 0 matches nothing. }
+var
+  Row, Col, ViewRows: Integer;
+  Line: TTermCellLine;
+  MinRow, MaxRow, LId: Integer;
+  Rect: TfpgRect;
+begin
+  if FController = nil then Exit;
+  if (ALinkA = 0) and (ALinkB = 0) then Exit;
+
+  ViewRows := RowsVisible;
+  MinRow := MaxInt;
+  MaxRow := -1;
+  for Row := 0 to ViewRows - 1 do
+  begin
+    Line := GetVirtualLine(FTopRow + Row);
+    for Col := 0 to High(Line) do
+    begin
+      LId := Line[Col].LinkId;
+      if (LId <> 0) and ((LId = ALinkA) or (LId = ALinkB)) then
+      begin
+        if Row < MinRow then MinRow := Row;
+        if Row > MaxRow then MaxRow := Row;
+        Break;        { one hit per row is enough to mark it dirty }
+      end;
+    end;
+  end;
+
+  if MaxRow < 0 then Exit;   { link isn't currently visible }
+
+  Rect.SetRect(0, MinRow * FCharHeight, ClientWidth,
+               (MaxRow - MinRow + 1) * FCharHeight + 1);  { +1 for the baseline }
+  InvalidateRect(Rect);
+end;
+
+function TTerminalFPGUIView.LinkURI(ALinkId: Integer): string;
+begin
+  if (ALinkId <> 0) and (FController <> nil) then
+    Result := FController.Core.HyperlinkURI(ALinkId)
+  else
+    Result := '';
+end;
+
+procedure TTerminalFPGUIView.SetHoverLink(ANewLink: Integer);
+{ Change which link is drawn solid.  The cell data is never touched — the
+  hovered id is a view-only overlay — and we repaint only the old and new
+  link's rows so moving on/off a link is a cheap dirty-line refresh. }
+var
+  OldLink: Integer;
+begin
+  if ANewLink = FHoverLinkId then Exit;
+  OldLink := FHoverLinkId;
+  FHoverLinkId := ANewLink;
+  if ANewLink <> 0 then
+    MouseCursor := mcHand
+  else
+    MouseCursor := mcDefault;
+  InvalidateLinkRows(OldLink, ANewLink);
+
+  { Notify embedders: leave the old link first, then enter the new one. }
+  if (OldLink <> 0) and Assigned(FOnLinkLeave) then
+    FOnLinkLeave(Self, OldLink, LinkURI(OldLink));
+  if (ANewLink <> 0) and Assigned(FOnLinkHover) then
+    FOnLinkHover(Self, ANewLink, LinkURI(ANewLink));
+end;
+
+procedure TTerminalFPGUIView.OpenURI(const AURI: string);
+var
+  Proc: TProcess;
+begin
+  if AURI = '' then Exit;
+  Proc := TProcess.Create(nil);
+  try
+    Proc.Executable := 'xdg-open';
+    Proc.Parameters.Add(AURI);
+    Proc.Options := [];                 { detached; don't block the pump }
+    try
+      Proc.Execute;
+    except
+      on E: Exception do { ignore — a bad URI must not crash the terminal };
+    end;
+  finally
+    Proc.Free;
+  end;
+end;
+
+function TTerminalFPGUIView.CopySelection: Boolean;
+begin
+  Result := HasSelection;
+  if Result then
+    DoCopy;
+end;
+
+procedure TTerminalFPGUIView.PasteClipboard;
+begin
+  DoPaste;
 end;
 
 procedure TTerminalFPGUIView.DoPaste;
@@ -559,7 +731,11 @@ end;
 
 function TTerminalFPGUIView.ClientWidth: Integer;
 begin
-  Result:= ActualWidth - FScrollbar.ActualWidth;
+  { Always reserve the scrollbar's column so the grid width — and therefore the
+    PTY column count — stays constant whether or not the scrollbar is showing.
+    Changing columns on every alt-screen enter/exit caused SIGWINCH storms and
+    reflow corruption of the restored main-buffer scrollback. }
+  Result := ActualWidth - FScrollbar.ActualWidth;
 end;
 
 function TTerminalFPGUIView.CellRect(ACol, ARow: Integer): TfpgRect;
@@ -626,6 +802,7 @@ var
   S: utf8string;
   VirtualRow: Integer;
   IsSelected: Boolean;
+  LinkX: Integer;
 begin
   if tafWideTrail in ACell.Attrs then
     Exit;
@@ -676,15 +853,29 @@ begin
     ACanvas.DrawString(R.Left, R.Top, S);
   end;
 
-  if (tafUnderline in ACell.Attrs) or (tafStrike in ACell.Attrs) then
+  ACanvas.Color := FG;
+  if tafStrike in ACell.Attrs then
+    ACanvas.DrawLine(R.Left, R.Top + R.Height div 2,
+                     R.Right, R.Top + R.Height div 2);
+
+  if ACell.LinkId <> 0 then
   begin
-    ACanvas.Color := FG;
-    if tafUnderline in ACell.Attrs then
-      ACanvas.DrawLine(R.Left, R.Bottom, R.Right, R.Bottom);
-    if tafStrike in ACell.Attrs then
-      ACanvas.DrawLine(R.Left, R.Top + R.Height div 2,
-                       R.Right, R.Top + R.Height div 2);
-  end;
+    { Hyperlink takes precedence over a plain SGR underline so links read as
+      links: a clearly dotted underline normally, solid while hovered. }
+    if ACell.LinkId = FHoverLinkId then
+      ACanvas.DrawLine(R.Left, R.Bottom, R.Right, R.Bottom)
+    else
+    begin
+      LinkX := R.Left;
+      while LinkX < R.Right do
+      begin
+        ACanvas.FillRectangle(LinkX, R.Bottom, 1, 1);   { 1px dot ... }
+        Inc(LinkX, 3);                                   { ... every 3px }
+      end;
+    end;
+  end
+  else if tafUnderline in ACell.Attrs then
+    ACanvas.DrawLine(R.Left, R.Bottom, R.Right, R.Bottom);
 end;
 
 function TTerminalFPGUIView.PixelToCell(X, Y: Integer): TTermCellPos;
@@ -1013,10 +1204,25 @@ begin
 end;
 
 procedure TTerminalFPGUIView.HandleKeyPress(var keycode: word; var shiftstate: TShiftState; var consumed: boolean);
+var
+  LHandled: Boolean;
 begin
   inherited HandleKeyPress(keycode, shiftstate, consumed);
   if FController = nil then
     Exit;
+
+  { App keybindings get first refusal. If the app consumes the chord (e.g. ran
+    a bound action), we stop; otherwise fall through to the built-in defaults. }
+  if Assigned(FOnKeyAction) then
+  begin
+    LHandled := False;
+    FOnKeyAction(Self, keycode, shiftstate, LHandled);
+    if LHandled then
+    begin
+      consumed := True;
+      Exit;
+    end;
+  end;
 
   { Shift+Insert is the unconditional paste escape hatch — check before
     routing Insert to the PTY. Ctrl+Shift+V is handled further down. }
@@ -1208,6 +1414,15 @@ var
 begin
   inherited HandleMouseMove(x, y, btnstate, shiftstate);
 
+  { Hyperlink hover is a purely visual, non-destructive highlight: hand cursor +
+    solid underline under the mouse (dirty-line repaint only).  Do it on every
+    button-less motion REGARDLESS of mouse mode — VTE/gnome-terminal keep
+    highlighting links even while a full-screen app (Claude, vim, etc.) has mouse
+    tracking enabled.  It does not consume the event, so motion is still reported
+    to the app in the block below. }
+  if (btnstate and (MOUSE_LEFT or MOUSE_MIDDLE or MOUSE_RIGHT)) = 0 then
+    SetHoverLink(LinkIdAt(x, y));
+
   if (FController <> nil) and (FController.Core.MouseProtocol <> tmpNone)
      and not (ssShift in shiftstate) then
   begin
@@ -1228,6 +1443,7 @@ begin
     Exit;
   end;
 
+  { No mouse mode and no button: hover was already handled above. }
   if (btnstate and MOUSE_LEFT) = 0 then
     Exit;
 
@@ -1254,10 +1470,41 @@ begin
   end;
 end;
 
+procedure TTerminalFPGUIView.HandleMouseExit;
+begin
+  inherited HandleMouseExit;
+  { Pointer left the widget — drop any hover so the solid line reverts to dotted
+    and we don't leave a stale hand cursor. }
+  SetHoverLink(0);
+end;
+
 procedure TTerminalFPGUIView.HandleLMouseUp(x, y: integer;
   shiftstate: TShiftState);
+var
+  LId: Integer;
+  LUri: string;
+  LHandled: Boolean;
 begin
   if TryMouseReport(x, y, shiftstate, tmbLeft, False, False) then Exit;
+
+  { A bare click (no drag selection) on a hyperlink opens it.  Embedders can
+    intercept via OnLinkClick and set AHandled to override the default. }
+  if not FSelection.Selecting then
+  begin
+    LId := LinkIdAt(x, y);
+    if LId <> 0 then
+    begin
+      LUri := LinkURI(LId);
+      LHandled := False;
+      if Assigned(FOnLinkClick) then
+        FOnLinkClick(Self, LId, LUri, LHandled);
+      if not LHandled then
+        OpenURI(LUri);
+      FMouseDownPending := False;
+      Exit;
+    end;
+  end;
+
   FMouseDownPending := False;
   if FSelection.Active and FSelection.Selecting then
   begin
