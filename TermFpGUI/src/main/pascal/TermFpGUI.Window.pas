@@ -525,7 +525,10 @@ begin
     fpgStyleManager.FreeStyleInstance;      // drop the old instance
     fpgStyle := fpgStyleManager.Style;      // recreate with the new style
     if FConfig <> nil then
+    begin
       FConfig.Theme := StyleName;
+      FConfig.Save(DefaultConfigPath);      // persist so it is restored on restart
+    end;
     Invalidate;                             // repaint chrome with the new style
   end;
 end;
