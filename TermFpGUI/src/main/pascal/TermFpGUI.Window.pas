@@ -94,6 +94,9 @@ type
     procedure FlashWindow;
     procedure FlashTick(Sender: TObject);
     procedure DisposeTab(ATab: TTermTab; AFreeController: Boolean);
+    { Pin the window's minimum size to the active view's geometry floor plus the
+      tab strip, so the WM refuses to drag the PTY below MIN_TERM_COLS/ROWS. }
+    procedure UpdateMinSize(AView: TTerminalFPGUIView);
   protected
     procedure AfterCreate; override;
     procedure HandleResize(awidth, aheight: TfpgCoord); override;
@@ -283,6 +286,8 @@ begin
       View.EmojiFontDesc := FConfig.EmojiFont;
   end;
 
+  UpdateMinSize(View);                  // font is set, so cell metrics are known
+
   SelectTab(Idx);                       // shows this view, hides others
 
   if AStartShell then
@@ -292,6 +297,16 @@ begin
     else
       Result.NeedStart := True;
   end;
+end;
+
+procedure TTermWindow.UpdateMinSize(AView: TTerminalFPGUIView);
+var
+  MinW, MinH: Integer;
+begin
+  if AView = nil then Exit;
+  AView.GetMinPixelSize(MinW, MinH);
+  MinWidth := MinW;
+  MinHeight := MinH + TAB_STRIP_H;
 end;
 
 procedure TTermWindow.StartTabShell(ATab: TTermTab);
@@ -573,6 +588,7 @@ begin
     Prof.FontDesc := V.FontDesc;
   FConfig.EmojiFont := V.EmojiFontDesc;   { emoji font stays a global override }
   FConfig.Save(DefaultConfigPath);
+  UpdateMinSize(V);                       { font size changed -> re-floor the window }
 end;
 
 procedure TTermWindow.ViewKeyAction(Sender: TObject; AKeyCode: Word;

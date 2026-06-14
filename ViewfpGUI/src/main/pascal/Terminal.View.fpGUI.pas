@@ -215,6 +215,11 @@ type
     procedure DetachController(AStopController: Boolean = True);
     procedure StartShell(const AShell: string = '');
     procedure ScrollBy(ADeltaRows: Integer);
+    { Minimum content pixels the view needs to stay above the geometry floor
+      (MIN_TERM_COLS x MIN_TERM_ROWS), scrollbar reservation included. The host
+      form adds its own chrome (tab strip) and pins the window MinWidth/Height
+      so the PTY is never dragged into the prompt-redraw-corruption regime. }
+    procedure GetMinPixelSize(out AMinW, AMinH: Integer);
 
     property Controller: TTerminalController read FController;
     property FontDesc: string read FFontDesc write FFontDesc;
@@ -355,6 +360,16 @@ const
   CURSOR_BLINK_MS = 750;
   PUMP_MS = 20;
   SELECTION_DRAG_THRESHOLD = 3; { pixels before mouse-down -> selection }
+
+  { Floor on the PTY geometry. Below ~2 rows or a couple dozen columns a
+    line-editor's SIGWINCH redraw (bash readline only erases the current
+    prompt line plus one above it) stops being able to scrub a prompt that
+    now wraps to 3+ rows, so stale prompt fragments survive each shrink.
+    Reflow then faithfully carries those fragments forward and they pile up.
+    Real terminals dodge the whole regime by refusing to get that small —
+    gnome-terminal floors at 28x2 — so we do the same. }
+  MIN_TERM_COLS = 28;
+  MIN_TERM_ROWS = 2;
 
   CONTEXT_COPY = 0;
   CONTEXT_PASTE = 1;
@@ -778,6 +793,13 @@ begin
   AText := RawByteString(fpgClipboard.Text);
 end;
 
+procedure TTerminalFPGUIView.GetMinPixelSize(out AMinW, AMinH: Integer);
+begin
+  UpdateMetrics;
+  AMinW := MIN_TERM_COLS * FCharWidth + Max(FScrollbar.Width, 18);
+  AMinH := MIN_TERM_ROWS * FCharHeight;
+end;
+
 procedure TTerminalFPGUIView.UpdateMetrics;
 var
   RowsPerPage: Integer;
@@ -1025,8 +1047,8 @@ begin
   if FController = nil then
     Exit;
   UpdateMetrics;
-  Cols := Max(1, ClientWidth div FCharWidth);
-  Rows := Max(1, ActualHeight div FCharHeight);
+  Cols := Max(MIN_TERM_COLS, ClientWidth div FCharWidth);
+  Rows := Max(MIN_TERM_ROWS, ActualHeight div FCharHeight);
   FController.Resize(Cols, Rows);
 end;
 
