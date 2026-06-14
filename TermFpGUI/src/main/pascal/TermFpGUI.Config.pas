@@ -86,6 +86,7 @@ type
     function AddProfile(P: TTermProfile): TTermProfile;
     function AddKey(AKeyCode: Word; AShift: TShiftState; AAction: TTermAction): TTermKeyBinding;
     function AddSignal(AKind: TTermSignalKind; ACode: Integer; AAction: TTermAction): TTermSignalBinding;
+    procedure RemoveProfile(AIndex: Integer);
     procedure RemoveKey(AIndex: Integer);
     procedure RemoveSignal(AIndex: Integer);
 
@@ -306,6 +307,13 @@ begin
   FSignals.Add(Result);
 end;
 
+procedure TTermConfig.RemoveProfile(AIndex: Integer);
+begin
+  if (AIndex < 0) or (AIndex >= FProfiles.Count) then Exit;
+  TObject(FProfiles[AIndex]).Free;
+  FProfiles.Delete(AIndex);
+end;
+
 procedure TTermConfig.RemoveKey(AIndex: Integer);
 begin
   if (AIndex < 0) or (AIndex >= FKeys.Count) then Exit;
@@ -477,6 +485,11 @@ begin
   Dir := ExtractFileDir(APath);
   if (Dir <> '') and (not DirectoryExists(Dir)) then
     ForceDirectories(Dir);
+  { Rewrite from scratch so removed/renamed profiles, keys and signals don't
+    leave orphan sections behind (Profile.* / Key.N sections would otherwise
+    survive and be reloaded). }
+  if FileExists(APath) then
+    DeleteFile(APath);
   Ini := TIniFile.Create(APath);
   try
     Ini.WriteString('General', 'theme', FTheme);

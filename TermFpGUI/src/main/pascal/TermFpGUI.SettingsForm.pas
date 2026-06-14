@@ -22,7 +22,7 @@ interface
 
 uses
   Classes, SysUtils, fpg_base, fpg_main, fpg_form, fpg_tab, fpg_grid,
-  fpg_button, fpg_dialogs, fpg_label, fpg_edit, fpg_combobox,
+  fpg_button, fpg_dialogs, fpg_label, fpg_edit, fpg_combobox, fpg_panel,
   TermFpGUI.Config, TermFpGUI.Actions;
 
 type
@@ -40,6 +40,9 @@ type
     function  MakeGridTab(const ATitle, ACol0, ACol1: string;
                           AW0, AW1: Integer; out ASheet: TfpgTabSheet): TfpgStringGrid;
     function  PromptAction(out AAction: TTermAction): Boolean;
+    procedure AddProfileClick(Sender: TObject);
+    procedure EditProfileClick(Sender: TObject);
+    procedure RemoveProfileClick(Sender: TObject);
     procedure AddKeyClick(Sender: TObject);
     procedure AddSignalClick(Sender: TObject);
     procedure RemoveSignalClick(Sender: TObject);
@@ -80,6 +83,28 @@ type
   public
     constructor Create(AOwner: TComponent); override;
     function BuildAction: TTermAction;     { valid after ShowModal = mrOK }
+  end;
+
+  { Modal dialog to add/edit a profile: name, font (via font dialog), and
+    foreground / background colours (via the colour picker, shown as swatches). }
+  TProfileEditForm = class(TfpgForm)
+  private
+    FNameEdit: TfpgEdit;
+    FFontEdit: TfpgEdit;
+    FFgSwatch, FBgSwatch: TfpgBevel;
+    FFontDesc: string;
+    FFg, FBg: TfpgColor;
+    procedure SyncSwatches;
+    procedure ChooseFontClick(Sender: TObject);
+    procedure ChooseFgClick(Sender: TObject);
+    procedure ChooseBgClick(Sender: TObject);
+    procedure OkClick(Sender: TObject);
+    procedure CancelClick(Sender: TObject);
+  public
+    constructor Create(AOwner: TComponent); override;
+    procedure LoadFrom(P: TTermProfile);
+    procedure StoreTo(P: TTermProfile);
+    function  ProfileName: string;
   end;
 
 { Modifier / lock keys live in $E300..$E386 (see keys.inc). }
@@ -187,6 +212,135 @@ begin
     Result := TTermAction.CreateBuiltin(NameToBuiltin(FCombo.Text), Trim(FArg.Text));
 end;
 
+{ TProfileEditForm }
+
+constructor TProfileEditForm.Create(AOwner: TComponent);
+var
+  Lbl: TfpgLabel;
+  Btn: TfpgButton;
+begin
+  inherited Create(AOwner);
+  WindowTitle := 'Edit Profile';
+  WindowPosition := wpScreenCenter;
+  SetPosition(0, 0, 380, 226);
+  Sizeable := False;
+  FFontDesc := 'Monospace-11';
+  FFg := clWhite;
+  FBg := TfpgColor($000000);
+
+  Lbl := TfpgLabel.Create(Self);
+  Lbl.SetPosition(12, 12, 80, 24);
+  Lbl.Text := 'Name:';
+  FNameEdit := TfpgEdit.Create(Self);
+  FNameEdit.SetPosition(96, 10, 272, 24);
+
+  Lbl := TfpgLabel.Create(Self);
+  Lbl.SetPosition(12, 46, 80, 24);
+  Lbl.Text := 'Font:';
+  FFontEdit := TfpgEdit.Create(Self);
+  FFontEdit.SetPosition(96, 44, 184, 24);
+  FFontEdit.Enabled := False;             { display only; use the picker }
+  Btn := TfpgButton.Create(Self);
+  Btn.Text := 'Choose…';
+  Btn.SetPosition(286, 44, 82, 24);
+  Btn.OnClick := @ChooseFontClick;
+
+  Btn := TfpgButton.Create(Self);
+  Btn.Text := 'Foreground…';
+  Btn.SetPosition(96, 82, 110, 26);
+  Btn.OnClick := @ChooseFgClick;
+  FFgSwatch := TfpgBevel.Create(Self);
+  FFgSwatch.SetPosition(216, 82, 60, 26);
+  FFgSwatch.Shape := bsBox;
+
+  Btn := TfpgButton.Create(Self);
+  Btn.Text := 'Background…';
+  Btn.SetPosition(96, 116, 110, 26);
+  Btn.OnClick := @ChooseBgClick;
+  FBgSwatch := TfpgBevel.Create(Self);
+  FBgSwatch.SetPosition(216, 116, 60, 26);
+  FBgSwatch.Shape := bsBox;
+
+  Btn := TfpgButton.Create(Self);
+  Btn.Text := 'Cancel';
+  Btn.SetPosition(196, 190, 80, 26);
+  Btn.OnClick := @CancelClick;
+  Btn := TfpgButton.Create(Self);
+  Btn.Text := 'OK';
+  Btn.SetPosition(284, 190, 84, 26);
+  Btn.OnClick := @OkClick;
+end;
+
+procedure TProfileEditForm.SyncSwatches;
+begin
+  FFgSwatch.BackgroundColor := FFg;
+  FBgSwatch.BackgroundColor := FBg;
+  FFgSwatch.Invalidate;
+  FBgSwatch.Invalidate;
+  FFontEdit.Text := FFontDesc;
+end;
+
+procedure TProfileEditForm.LoadFrom(P: TTermProfile);
+begin
+  FNameEdit.Text := P.Name;
+  FFontDesc := P.FontDesc;
+  FFg := P.FGColor;
+  FBg := P.BGColor;
+  SyncSwatches;
+end;
+
+procedure TProfileEditForm.StoreTo(P: TTermProfile);
+begin
+  P.Name := Trim(FNameEdit.Text);
+  P.FontDesc := FFontDesc;
+  P.FGColor := FFg;
+  P.BGColor := FBg;
+end;
+
+function TProfileEditForm.ProfileName: string;
+begin
+  Result := Trim(FNameEdit.Text);
+end;
+
+procedure TProfileEditForm.ChooseFontClick(Sender: TObject);
+var
+  S: string;
+begin
+  S := FFontDesc;
+  if SelectFontDialog(S) then
+  begin
+    FFontDesc := S;
+    FFontEdit.Text := S;
+  end;
+end;
+
+procedure TProfileEditForm.ChooseFgClick(Sender: TObject);
+begin
+  FFg := fpgSelectColorDialog(FFg);
+  SyncSwatches;
+end;
+
+procedure TProfileEditForm.ChooseBgClick(Sender: TObject);
+begin
+  FBg := fpgSelectColorDialog(FBg);
+  SyncSwatches;
+end;
+
+procedure TProfileEditForm.OkClick(Sender: TObject);
+begin
+  if ProfileName = '' then
+  begin
+    TfpgMessageDialog.Warning('Profile', 'Please enter a profile name.');
+    Exit;
+  end;
+  ModalResult := mrOK;
+end;
+
+procedure TProfileEditForm.CancelClick(Sender: TObject);
+begin
+  ModalResult := mrCancel;
+end;
+
 const
   FORM_W  = 560;
   FORM_H  = 440;
@@ -218,6 +372,24 @@ begin
 
   { Per-tab add/remove buttons live inside their own tab sheet, so each is only
     shown when that tab is active. }
+  Btn := TfpgButton.Create(ProfSheet);
+  Btn.Parent := ProfSheet;
+  Btn.Text := 'Add Profile';
+  Btn.SetPosition(4, GRID_H - 26, 100, 26);
+  Btn.OnClick := @AddProfileClick;
+
+  Btn := TfpgButton.Create(ProfSheet);
+  Btn.Parent := ProfSheet;
+  Btn.Text := 'Edit Profile';
+  Btn.SetPosition(110, GRID_H - 26, 100, 26);
+  Btn.OnClick := @EditProfileClick;
+
+  Btn := TfpgButton.Create(ProfSheet);
+  Btn.Parent := ProfSheet;
+  Btn.Text := 'Remove Profile';
+  Btn.SetPosition(216, GRID_H - 26, 110, 26);
+  Btn.OnClick := @RemoveProfileClick;
+
   Btn := TfpgButton.Create(KeysSheet);
   Btn.Parent := KeysSheet;
   Btn.Text := 'Add Key';
@@ -328,6 +500,71 @@ begin
   finally
     Frm.Free;
   end;
+end;
+
+procedure TTermSettingsForm.AddProfileClick(Sender: TObject);
+var
+  Frm: TProfileEditForm;
+  Seed, P: TTermProfile;
+begin
+  Frm := TProfileEditForm.Create(nil);
+  Seed := TTermProfile.Create('New Profile', 'Monospace-11', clWhite, TfpgColor($000000));
+  try
+    Frm.LoadFrom(Seed);
+    if Frm.ShowModal = mrOK then
+    begin
+      P := TTermProfile.Create('', '', clWhite, TfpgColor($000000));
+      Frm.StoreTo(P);
+      FConfig.AddProfile(P);
+      RefreshProfiles;
+    end;
+  finally
+    Seed.Free;
+    Frm.Free;
+  end;
+end;
+
+procedure TTermSettingsForm.EditProfileClick(Sender: TObject);
+var
+  Frm: TProfileEditForm;
+  P: TTermProfile;
+  OldName: string;
+begin
+  if (FProfilesGrid.FocusRow < 0) or (FProfilesGrid.FocusRow >= FConfig.ProfileCount) then Exit;
+  P := FConfig.Profiles[FProfilesGrid.FocusRow];
+  OldName := P.Name;
+  Frm := TProfileEditForm.Create(nil);
+  try
+    Frm.LoadFrom(P);
+    if Frm.ShowModal = mrOK then
+    begin
+      Frm.StoreTo(P);
+      { Keep the active-profile pointer valid if this one was renamed. }
+      if SameText(OldName, FConfig.ActiveProfile) and not SameText(P.Name, OldName) then
+        FConfig.ActiveProfile := P.Name;
+      RefreshProfiles;
+    end;
+  finally
+    Frm.Free;
+  end;
+end;
+
+procedure TTermSettingsForm.RemoveProfileClick(Sender: TObject);
+var
+  ProfName: string;
+begin
+  if (FProfilesGrid.FocusRow < 0) or (FProfilesGrid.FocusRow >= FConfig.ProfileCount) then Exit;
+  if FConfig.ProfileCount <= 1 then
+  begin
+    TfpgMessageDialog.Warning('Remove Profile', 'At least one profile must remain.');
+    Exit;
+  end;
+  ProfName := FConfig.Profiles[FProfilesGrid.FocusRow].Name;
+  FConfig.RemoveProfile(FProfilesGrid.FocusRow);
+  { If the active profile was removed, fall back to the first one. }
+  if SameText(ProfName, FConfig.ActiveProfile) and (FConfig.ProfileCount > 0) then
+    FConfig.ActiveProfile := FConfig.Profiles[0].Name;
+  RefreshProfiles;
 end;
 
 { Capture a key chord, then choose its action. }
