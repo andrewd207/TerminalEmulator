@@ -237,6 +237,7 @@ var
   Ctrl: TTerminalController;
   Title: string;
   Idx: Integer;
+  Prof: TTermProfile;
 begin
   Title := ATitle;
   if Title = '' then
@@ -269,13 +270,17 @@ begin
   Result.View := View;
   FTabs.Add(Result);
 
-  if (FConfig <> nil) and (FConfig.ProfileCount > 0) then
-    FConfig.Profiles[0].ApplyTo(View);
-  { A font picked earlier via the right-click menu overrides the profile font. }
+  { Apply the saved active profile (font lives in the profile now); fall back to
+    the first profile if the saved name is gone. }
   if FConfig <> nil then
   begin
-    if FConfig.Font <> '' then View.FontDesc := FConfig.Font;
-    if FConfig.EmojiFont <> '' then View.EmojiFontDesc := FConfig.EmojiFont;
+    Prof := FConfig.FindProfile(FConfig.ActiveProfile);
+    if (Prof = nil) and (FConfig.ProfileCount > 0) then
+      Prof := FConfig.Profiles[0];
+    if Prof <> nil then
+      Prof.ApplyTo(View);
+    if FConfig.EmojiFont <> '' then
+      View.EmojiFontDesc := FConfig.EmojiFont;
   end;
 
   SelectTab(Idx);                       // shows this view, hides others
@@ -401,19 +406,24 @@ end;
 procedure TTermWindow.HamburgerClicked(Sender: TObject);
 var
   i: Integer;
-  Item: TfpgMenuItem;
+  Item, Sub: TfpgMenuItem;
   Styles: TStringList;
 begin
   FreeAndNil(FMenu);
   FMenu := TfpgPopupMenu.Create(Self);
   FMenu.AddMenuItem('New Tab', '', @MiNewTab);
 
-  { Submenus, owned by their parent item (the canonical fpGUI pattern). }
+  { Submenus, owned by their parent item (the canonical fpGUI pattern).  The
+    active profile / theme is shown checked (fpGUI's radio equivalent), so the
+    saved-and-restored selection is visible. }
   Item := FMenu.AddMenuItem('Profile', '', nil);
   Item.SubMenu := TfpgPopupMenu.Create(Item);
   if FConfig <> nil then
     for i := 0 to FConfig.ProfileCount - 1 do
-      Item.SubMenu.AddMenuItem(FConfig.Profiles[i].Name, '', @MiApplyProfile);
+    begin
+      Sub := Item.SubMenu.AddMenuItem(FConfig.Profiles[i].Name, '', @MiApplyProfile);
+      Sub.Checked := SameText(FConfig.Profiles[i].Name, FConfig.ActiveProfile);
+    end;
 
   Item := FMenu.AddMenuItem('Theme', '', nil);
   Item.SubMenu := TfpgPopupMenu.Create(Item);
@@ -421,7 +431,11 @@ begin
   try
     fpgStyleManager.AssignStyleTypes(Styles);
     for i := 0 to Styles.Count - 1 do
-      Item.SubMenu.AddMenuItem(Styles[i], '', @MiApplyTheme);
+    begin
+      Sub := Item.SubMenu.AddMenuItem(Styles[i], '', @MiApplyTheme);
+      if FConfig <> nil then
+        Sub.Checked := SameText(Styles[i], FConfig.Theme);
+    end;
   finally
     Styles.Free;
   end;
@@ -489,8 +503,12 @@ var
 begin
   if FConfig = nil then Exit;
   Prof := FConfig.FindProfile(NameAfterColon(TfpgMenuItem(Sender).Text));
+  if Prof = nil then Exit;
+  { Remember the choice so it is restored next launch and shown checked. }
+  FConfig.ActiveProfile := Prof.Name;
+  FConfig.Save(DefaultConfigPath);
   Tab := ActiveTab;
-  if (Prof <> nil) and (Tab <> nil) and (Tab.View <> nil) then
+  if (Tab <> nil) and (Tab.View <> nil) then
   begin
     Prof.ApplyTo(Tab.View);
     Tab.View.Invalidate;
@@ -536,16 +554,21 @@ begin
   if FTabs.Count = 0 then Close else SyncActive;
 end;
 
-{ The view's right-click "Change Font" fires this; persist it so it survives a
-  restart (and apply it to future tabs via AddTab). }
+{ The view's right-click "Change Font" fires this; fold the new font into the
+  active profile so it persists and future tabs inherit it. }
 procedure TTermWindow.ViewFontChanged(Sender: TObject);
 var
   V: TTerminalFPGUIView;
+  Prof: TTermProfile;
 begin
   if (FConfig = nil) or (not (Sender is TTerminalFPGUIView)) then Exit;
   V := TTerminalFPGUIView(Sender);
-  FConfig.Font := V.FontDesc;
-  FConfig.EmojiFont := V.EmojiFontDesc;
+  Prof := FConfig.FindProfile(FConfig.ActiveProfile);
+  if (Prof = nil) and (FConfig.ProfileCount > 0) then
+    Prof := FConfig.Profiles[0];
+  if Prof <> nil then
+    Prof.FontDesc := V.FontDesc;
+  FConfig.EmojiFont := V.EmojiFontDesc;   { emoji font stays a global override }
   FConfig.Save(DefaultConfigPath);
 end;
 

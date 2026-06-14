@@ -65,6 +65,7 @@ type
     FKeys: TFPList;
     FSignals: TFPList;
     FTheme: string;
+    FActiveProfile: string;
     FFont: string;
     FEmojiFont: string;
     FLinkOpenCommand: string;
@@ -100,6 +101,9 @@ type
     property SignalCount: Integer read GetSignalCount;
     property Signals[I: Integer]: TTermSignalBinding read GetSignal;
     property Theme: string read FTheme write FTheme;
+    { Name of the profile currently applied; restored at startup and shown
+      checked in the Profile menu.  '' falls back to the first profile. }
+    property ActiveProfile: string read FActiveProfile write FActiveProfile;
     { Last font chosen via the view's right-click menu; '' = use profile font. }
     property Font: string read FFont write FFont;
     property EmojiFont: string read FEmojiFont write FEmojiFont;
@@ -360,6 +364,7 @@ procedure TTermConfig.LoadDefaults;
 begin
   Clear;
   FTheme := '';                          { '' = fpGUI's built-in default style }
+  FActiveProfile := 'Default';
   FFont := '';
   FEmojiFont := '';
   FLinkOpenCommand := '';                { '' = view's built-in xdg-open }
@@ -409,6 +414,7 @@ begin
   Sections := TStringList.Create;
   try
     FTheme := Ini.ReadString('General', 'theme', '');
+    FActiveProfile := Ini.ReadString('General', 'profile', 'Default');
     FFont := Ini.ReadString('General', 'font', '');
     FEmojiFont := Ini.ReadString('General', 'emojifont', '');
     FLinkOpenCommand := Ini.ReadString('General', 'linkopencommand', '');
@@ -445,6 +451,17 @@ begin
     Sections.Free;
     Ini.Free;
   end;
+  { Migrate a legacy global font override (older versions stored the font here
+    instead of in the profile) into the active profile, then drop it. }
+  if FFont <> '' then
+  begin
+    P := FindProfile(FActiveProfile);
+    if (P = nil) and (ProfileCount > 0) then
+      P := GetProfile(0);
+    if P <> nil then
+      P.FontDesc := FFont;
+    FFont := '';
+  end;
   { An empty/partial file still gets sane keybindings. }
   if (KeyCount = 0) and (ProfileCount = 0) then
     LoadDefaults;
@@ -463,6 +480,7 @@ begin
   Ini := TIniFile.Create(APath);
   try
     Ini.WriteString('General', 'theme', FTheme);
+    Ini.WriteString('General', 'profile', FActiveProfile);
     Ini.WriteString('General', 'font', FFont);
     Ini.WriteString('General', 'emojifont', FEmojiFont);
     Ini.WriteString('General', 'linkopencommand', FLinkOpenCommand);
