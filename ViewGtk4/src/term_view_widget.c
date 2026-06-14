@@ -61,6 +61,13 @@ struct _TermViewWidget {
        cell data is never modified. */
     int              hover_link_id;
 
+    /* Cached render node of the cell grid (cells + dotted link underlines).
+       Rebuilt only when content/size/scroll changes — NOT on cursor blink or
+       hover, which paint as cheap overlays on top of this cached node. */
+    GskRenderNode   *grid_node;
+    gboolean         grid_dirty;
+    int              grid_w, grid_h, grid_top_row;
+
     /* Popover. */
     GtkWidget       *popover;
     GtkWidget       *mi_copy;
@@ -169,9 +176,18 @@ static gboolean cell_in_selection(TermViewWidget *self, int virt_row, int col) {
 /* TV core callbacks                                                  */
 /* ------------------------------------------------------------------ */
 
+/* Mark the cached grid node stale and request a redraw. Use this for anything
+   that changes grid CONTENT (output, scroll, selection, font, resize). Cursor
+   blink and hover use a plain gtk_widget_queue_draw — they only repaint the
+   cheap overlays over the still-valid cached grid. */
+static void invalidate_grid(TermViewWidget *self) {
+    self->grid_dirty = TRUE;
+    gtk_widget_queue_draw(GTK_WIDGET(self));
+}
+
 static void on_tv_invalidate(void *user) {
     TermViewWidget *self = TERM_VIEW_WIDGET(user);
-    gtk_widget_queue_draw(GTK_WIDGET(self));
+    invalidate_grid(self);
 }
 
 static void on_tv_bell(void *user) {
@@ -188,7 +204,7 @@ static void on_tv_exit(void *user) {
     TermViewWidget *self = TERM_VIEW_WIDGET(user);
     self->shell_exited = TRUE;
     g_signal_emit(self, signals[SIG_SHELL_EXITED], 0);
-    gtk_widget_queue_draw(GTK_WIDGET(self));
+    invalidate_grid(self);
 }
 
 static void on_tv_clip_set(const char *targets G_GNUC_UNUSED,
@@ -245,7 +261,7 @@ static gboolean pump_tick(gpointer ud) {
             double page = gtk_adjustment_get_page_size(self->vadjust);
             gtk_adjustment_set_value(self->vadjust, MAX(0.0, upper - page));
         }
-        gtk_widget_queue_draw(GTK_WIDGET(self));
+        invalidate_grid(self);
     }
     return G_SOURCE_CONTINUE;
 }
@@ -262,16 +278,12 @@ static gboolean cursor_tick(gpointer ud) {
 /* Paint                                                              */
 /* ------------------------------------------------------------------ */
 
-static void term_view_widget_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
-    TermViewWidget *self = TERM_VIEW_WIDGET(widget);
-    int w = gtk_widget_get_width(widget);
-    int h = gtk_widget_get_height(widget);
-    if (w <= 0 || h <= 0 || !self->tv) return;
-
-    cairo_t *cr = gtk_snapshot_append_cairo(snapshot,
-                    &GRAPHENE_RECT_INIT(0, 0, (float)w, (float)h));
-
-    /* Background. */
+/* Render the full cell grid (background, cells, and dotted link underlines for
+   ALL links) into cr. The cursor and the hovered-link SOLID underline are NOT
+   drawn here — they are cheap per-frame overlays. This is the expensive pass,
+   so its output is cached in a render node and only regenerated when content,
+   size, or scroll position changes. */
+static void render_grid_to_cr(TermViewWidget *self, cairo_t *cr, int w, int h) {
     set_cairo_color(cr, DEFAULT_BG);
     cairo_rectangle(cr, 0, 0, w, h);
     cairo_fill(cr);
@@ -281,12 +293,6 @@ static void term_view_widget_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) 
 
     int rows = rows_visible(self);
     int cols = cols_visible(self);
-    if (tv_in_alt_buffer(self->tv))
-        self->top_row = tv_history_count(self->tv);
-
-    int cursor_v_row = tv_history_count(self->tv) + tv_cursor_row(self->tv);
-    int cursor_col   = tv_cursor_col(self->tv);
-    int cursor_visible_flag = tv_cursor_visible(self->tv) && self->cursor_visible;
 
     for (int row = 0; row < rows; ++row) {
         int v_row = self->top_row + row;
@@ -310,12 +316,8 @@ static void term_view_widget_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) 
             if (cell.flags & TV_ATTR_INVERSE) { guint32 t = fg; fg = bg; bg = t; }
             if (cell.flags & TV_ATTR_HIDDEN)  fg = bg;
 
-            gboolean hosts_cursor = cursor_visible_flag
-                && (v_row == cursor_v_row) && (col == cursor_col);
-
             gboolean selected = cell_in_selection(self, v_row, col);
             if (selected) { fg = SELECTION_FG; bg = SELECTION_BG; }
-            if (hosts_cursor) { guint32 t = fg; fg = bg; bg = t; }
 
             int cw = (cell.flags & TV_ATTR_WIDE_LEAD) ? self->char_w * 2 : self->char_w;
             int x = col * self->char_w;
@@ -325,7 +327,6 @@ static void term_view_widget_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) 
             cairo_rectangle(cr, x, y, cw, self->char_h);
             cairo_fill(cr);
 
-            if (cell.flags & TV_ATTR_BLINK && !self->cursor_visible) continue;
             if (cell.cluster[0] == 0) continue;
 
             /* Build a Pango markup for bold/italic/underline/strike. */
@@ -347,9 +348,9 @@ static void term_view_widget_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) 
             pango_cairo_show_layout(cr, layout);
         }
 
-        /* Hyperlink underlines, drawn after the row's cells and coalesced per
-           link run so the dotted phase stays continuous across cell boundaries:
-           solid while hovered, otherwise a continuous dotted line. */
+        /* Dotted hyperlink underlines, coalesced per link run so the dot phase
+           stays continuous across cell boundaries. (The hovered link's SOLID
+           line is drawn separately as an overlay.) */
         int ly = row * self->char_h + self->char_h - 1;
         int lc = 0;
         while (lc <= last_col) {
@@ -368,23 +369,135 @@ static void term_view_widget_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) 
             }
             int lx0 = run_start * self->char_w;
             int lx1 = lc * self->char_w;          /* exclusive right edge */
-            if ((int)lid == self->hover_link_id) {
-                cairo_set_line_width(cr, 1.0);
-                cairo_move_to(cr, lx0, ly + 0.5);
-                cairo_line_to(cr, lx1, ly + 0.5);
-                cairo_stroke(cr);
-            } else {
-                for (int px = lx0; px < lx1; px += 3)  /* 1px dot every 3px */
-                    cairo_rectangle(cr, px, ly, 1, 1);
-                cairo_fill(cr);
-            }
+            for (int px = lx0; px < lx1; px += 3)  /* 1px dot every 3px */
+                cairo_rectangle(cr, px, ly, 1, 1);
+            cairo_fill(cr);
         }
     }
 
-    /* Underscore cursor (block-style is already covered by inverse swap). */
-    /* No explicit underscore for now; block cursor is handled above. */
-
     g_object_unref(layout);
+}
+
+/* Overlay: block cursor on the cursor cell. Drawn fresh each frame so blink is
+   cheap (no grid re-rasterization). Mirrors the inverse-swap the grid would
+   otherwise bake in. */
+static void render_cursor_overlay(TermViewWidget *self, cairo_t *cr) {
+    if (!(tv_cursor_visible(self->tv) && self->cursor_visible)) return;
+
+    int cursor_v_row = tv_history_count(self->tv) + tv_cursor_row(self->tv);
+    int cursor_col   = tv_cursor_col(self->tv);
+    int row = cursor_v_row - self->top_row;
+    if (row < 0 || row >= rows_visible(self)) return;
+    if (cursor_col < 0 || cursor_col >= cols_visible(self)) return;
+
+    tv_cell_t cell;
+    if (!tv_get_cell(self->tv, cursor_v_row, cursor_col, &cell)) return;
+
+    guint32 fg = cell_fg(cell.fg_rgb);
+    guint32 bg = cell_bg(cell.bg_rgb);
+    if (cell.flags & TV_ATTR_INVERSE) { guint32 t = fg; fg = bg; bg = t; }
+    if (cell_in_selection(self, cursor_v_row, cursor_col)) { fg = SELECTION_FG; bg = SELECTION_BG; }
+    /* Block cursor = inverse of the cell. */
+    { guint32 t = fg; fg = bg; bg = t; }
+
+    int cw = (cell.flags & TV_ATTR_WIDE_LEAD) ? self->char_w * 2 : self->char_w;
+    int x = cursor_col * self->char_w;
+    int y = row * self->char_h;
+
+    set_cairo_color(cr, bg);
+    cairo_rectangle(cr, x, y, cw, self->char_h);
+    cairo_fill(cr);
+
+    if (cell.cluster[0] != 0) {
+        PangoLayout *layout = pango_cairo_create_layout(cr);
+        pango_layout_set_font_description(layout, self->font_desc);
+        PangoAttrList *attrs = pango_attr_list_new();
+        if (cell.flags & TV_ATTR_BOLD)
+            pango_attr_list_insert(attrs, pango_attr_weight_new(PANGO_WEIGHT_BOLD));
+        if (cell.flags & TV_ATTR_ITALIC)
+            pango_attr_list_insert(attrs, pango_attr_style_new(PANGO_STYLE_ITALIC));
+        pango_layout_set_attributes(layout, attrs);
+        pango_attr_list_unref(attrs);
+        pango_layout_set_text(layout, cell.cluster, -1);
+        set_cairo_color(cr, fg);
+        cairo_move_to(cr, x, y);
+        pango_cairo_show_layout(cr, layout);
+        g_object_unref(layout);
+    }
+}
+
+/* Overlay: the hovered link's SOLID underline, coalesced per run. Only touches
+   rows containing the hovered link, and only when something is hovered. */
+static void render_hover_overlay(TermViewWidget *self, cairo_t *cr) {
+    if (self->hover_link_id == 0) return;
+    int rows = rows_visible(self);
+    int cols = cols_visible(self);
+    for (int row = 0; row < rows; ++row) {
+        int v_row = self->top_row + row;
+        if (v_row < 0 || v_row >= virtual_rows(self)) continue;
+        int line_len = tv_line_length(self->tv, v_row);
+        if (line_len <= 0) continue;
+        int last_col = MIN(line_len - 1, cols - 1);
+        int ly = row * self->char_h + self->char_h - 1;
+        int lc = 0;
+        while (lc <= last_col) {
+            tv_cell_t cell;
+            if (!tv_get_cell(self->tv, v_row, lc, &cell)
+                || (int)cell.link_id != self->hover_link_id) {
+                ++lc;
+                continue;
+            }
+            int run_start = lc;
+            set_cairo_color(cr, cell_fg(cell.fg_rgb));
+            while (lc <= last_col) {
+                tv_cell_t c2;
+                if (!tv_get_cell(self->tv, v_row, lc, &c2)
+                    || (int)c2.link_id != self->hover_link_id) break;
+                ++lc;
+            }
+            int lx0 = run_start * self->char_w;
+            int lx1 = lc * self->char_w;
+            cairo_set_line_width(cr, 1.0);
+            cairo_move_to(cr, lx0, ly + 0.5);
+            cairo_line_to(cr, lx1, ly + 0.5);
+            cairo_stroke(cr);
+        }
+    }
+}
+
+static void term_view_widget_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
+    TermViewWidget *self = TERM_VIEW_WIDGET(widget);
+    int w = gtk_widget_get_width(widget);
+    int h = gtk_widget_get_height(widget);
+    if (w <= 0 || h <= 0 || !self->tv) return;
+
+    if (tv_in_alt_buffer(self->tv))
+        self->top_row = tv_history_count(self->tv);
+
+    /* Rebuild the cached grid node only when something that affects grid content
+       changed: an explicit invalidate, a size change, or a scroll/alt-buffer
+       top-row change. Cursor blink and hover skip this entirely. */
+    if (self->grid_dirty || self->grid_node == NULL
+        || self->grid_w != w || self->grid_h != h
+        || self->grid_top_row != self->top_row) {
+        if (self->grid_node) gsk_render_node_unref(self->grid_node);
+        graphene_rect_t bounds = GRAPHENE_RECT_INIT(0, 0, (float)w, (float)h);
+        self->grid_node = gsk_cairo_node_new(&bounds);
+        cairo_t *gcr = gsk_cairo_node_get_draw_context(self->grid_node);
+        render_grid_to_cr(self, gcr, w, h);
+        cairo_destroy(gcr);
+        self->grid_dirty = FALSE;
+        self->grid_w = w;
+        self->grid_h = h;
+        self->grid_top_row = self->top_row;
+    }
+    gtk_snapshot_append_node(snapshot, self->grid_node);
+
+    /* Cheap per-frame overlays on top of the cached grid. */
+    cairo_t *cr = gtk_snapshot_append_cairo(snapshot,
+                    &GRAPHENE_RECT_INIT(0, 0, (float)w, (float)h));
+    render_cursor_overlay(self, cr);
+    render_hover_overlay(self, cr);
     cairo_destroy(cr);
 }
 
@@ -445,6 +558,7 @@ static void update_font_metrics(TermViewWidget *self) {
     if (self->char_w <= 0) self->char_w = 8;
     if (self->char_h <= 0) self->char_h = 12;
     pango_font_metrics_unref(m);
+    self->grid_dirty = TRUE;   /* metrics changed — cached grid is stale */
 }
 
 /* ------------------------------------------------------------------ */
@@ -454,7 +568,7 @@ static void update_font_metrics(TermViewWidget *self) {
 static void on_vadjust_value_changed(GtkAdjustment *adj, gpointer ud) {
     TermViewWidget *self = (TermViewWidget *)ud;
     self->top_row = (int)gtk_adjustment_get_value(adj);
-    gtk_widget_queue_draw(GTK_WIDGET(self));
+    invalidate_grid(self);
 }
 
 static void update_adjustment(TermViewWidget *self) {
@@ -831,7 +945,7 @@ static void on_click_pressed(GtkGestureClick *gesture, int n_press G_GNUC_UNUSED
     self->sel_down_x = (int)x;
     self->sel_down_y = (int)y;
     self->sel_anchor = pixel_to_cell(self, x, y);
-    if (had_selection) gtk_widget_queue_draw(GTK_WIDGET(self));
+    if (had_selection) invalidate_grid(self);
 }
 
 static void on_motion(GtkEventControllerMotion *m, double x, double y, gpointer ud) {
@@ -869,7 +983,7 @@ static void on_motion(GtkEventControllerMotion *m, double x, double y, gpointer 
 
     if (self->sel_active && self->sel_dragging) {
         self->sel_focus = pixel_to_cell(self, x, y);
-        gtk_widget_queue_draw(GTK_WIDGET(self));
+        invalidate_grid(self);
     }
 }
 
@@ -912,7 +1026,7 @@ static void on_click_released(GtkGestureClick *gesture, int n_press G_GNUC_UNUSE
     if (self->sel_active && self->sel_dragging) {
         self->sel_focus = pixel_to_cell(self, x, y);
         self->sel_dragging = FALSE;
-        gtk_widget_queue_draw(GTK_WIDGET(self));
+        invalidate_grid(self);
     }
 }
 
@@ -1117,6 +1231,7 @@ static void term_view_widget_dispose(GObject *obj) {
         self->popover = NULL;
     }
     if (self->tv) { tv_controller_free(self->tv); self->tv = NULL; }
+    if (self->grid_node) { gsk_render_node_unref(self->grid_node); self->grid_node = NULL; }
     g_clear_object(&self->im);
     if (self->menu_model) { g_object_unref(self->menu_model); self->menu_model = NULL; }
     G_OBJECT_CLASS(term_view_widget_parent_class)->dispose(obj);
