@@ -37,6 +37,58 @@ type
   TTermLinkClickEvent = procedure(Sender: TObject; ALinkId: Integer;
     const AURI: string; var AHandled: Boolean) of object;
 
+  { Off-screen canvas that renders straight into a TfpgImage's 32-bit
+    ImageData.  The view uses it to bake the cell grid into a privately-owned
+    image that the parent window's full-buffer clear cannot touch; each paint
+    then blits that image and draws only the cursor/hover as overlays.
+
+    Backgrounds and lines are written as fully opaque BGRA pixels (no alpha
+    blending — the costly AggPas path), so the later image blit hits AggPas's
+    opaque copy fast-path.  Glyphs go through the font's DrawTextToBuffer.
+    Only the handful of primitives the grid renderer calls are functional;
+    the remaining TfpgCanvasBase abstracts are inert stubs. }
+  TTermImageCanvas = class(TfpgCanvasBase)
+  private
+    FData: PByte;
+    FStride: Integer;
+    FW, FH: Integer;                              { allocated image size, px }
+    FColorBGRA: LongWord;                         { pen colour, opaque BGRA }
+    FClipX1, FClipY1, FClipX2, FClipY2: Integer;  { half-open clip box }
+    procedure FillSpan(AX, AY, AW: Integer); inline;
+  protected
+    procedure DoSetColor(cl: TfpgColor); override;
+    procedure DoSetTextColor(cl: TfpgColor); override;
+    procedure DoSetFontRes(fntres: TfpgFontResourceBase); override;
+    procedure DoFillRectangle(x, y, w, h: TfpgCoord); override;
+    procedure DoDrawLine(x1, y1, x2, y2: TfpgCoord); override;
+    procedure DoDrawString(x, y: TfpgCoord; const txt: string); override;
+    procedure DoSetClipRect(const ARect: TfpgRect); override;
+    function  DoGetClipRect: TfpgRect; override;
+    procedure DoAddClipRect(const ARect: TfpgRect); override;
+    procedure DoClearClipRect; override;
+    { --- unused stubs --- }
+    procedure DoSetLineStyle(awidth: integer; astyle: TfpgLineStyle); override;
+    procedure DoXORFillRectangle(col: TfpgColor; x, y, w, h: TfpgCoord); override;
+    procedure DoFillTriangle(x1, y1, x2, y2, x3, y3: TfpgCoord); override;
+    procedure DoDrawRectangle(x, y, w, h: TfpgCoord); override;
+    procedure DoDrawImagePart(x, y: TfpgCoord; img: TfpgImageBase; xi, yi, w, h: integer); override;
+    procedure DoDrawArc(x, y, w, h: TfpgCoord; a1, a2: double); override;
+    procedure DoFillArc(x, y, w, h: TfpgCoord; a1, a2: double); override;
+    procedure DoDrawPolygon(const Points: array of TPoint); override;
+    function  GetPixel(X, Y: integer): TfpgColor; override;
+    procedure SetPixel(X, Y: integer; const AValue: TfpgColor); override;
+    procedure DoBeginDraw(awidget: TfpgWidgetBase; CanvasTarget: TfpgCanvasBase); override;
+    procedure DoPutBufferToScreen(x, y, w, h: TfpgCoord); override;
+    procedure DoEndDraw; override;
+    function  GetBufferAllocated: Boolean; override;
+    procedure DoAllocateBuffer; override;
+    procedure DoRestoreFromBuffer(const ARect: TfpgRect); override;
+  public
+    { Point the canvas at AImage; clip defaults to the AUsedW x AUsedH
+      top-left region (the live grid area within a possibly-larger image). }
+    procedure SetTarget(AImage: TfpgImage; AUsedW, AUsedH: Integer);
+  end;
+
   { TTerminalFPGUIView }
 
   TTerminalFPGUIView = class(TfpgWidget)
@@ -55,6 +107,18 @@ type
     FCharHeight: Integer;
     FTopRow: Integer;
     FCursorBlinkVisible: Boolean;
+    { Off-screen grid cache.  The cell grid is baked into FGridImage (via
+      FGridCanvas) only when content/layout actually change; every paint just
+      blits it and overlays the cursor/hover.  Buffer is grow-only. }
+    FGridImage: TfpgImage;
+    FGridCanvas: TTermImageCanvas;
+    FGridAllocW, FGridAllocH: Integer;   { allocated image size (grow-only) }
+    FGridW, FGridH: Integer;             { live grid size the cache reflects }
+    FGridTopRow: Integer;                { FTopRow the cache was built for }
+    FGridValid: Boolean;                 { cache holds a usable render }
+    FFastBlit: Integer;                  { 0=untested, 1=direct copy ok, 2=fall back }
+    FGridDirtyAll: Boolean;              { whole grid must be re-rendered }
+    FDirtySTop, FDirtySBot: Integer;     { dirty screen-row band; empty when Top>Bot }
     FHoverLinkId: Integer;        { OSC 8 link currently under the mouse, 0 = none }
     FDefaultFGColor: TfpgColor;
     FSelection: TTermSelection;
@@ -100,8 +164,8 @@ type
     function MapColor(const AColor: TTermColor; IsBackground: Boolean): TfpgColor;
     function CellText(const ACell: TTermCell): Utf8String;
     function PickFont(const AAttrs: TTermAttrFlags; ACodePoint: Cardinal): TfpgFontResourceBase;
-    procedure PaintCell(const ACanvas: TfpgCanvas; ACol, AViewRow: Integer; const ACell: TTermCell; AHasCursor: Boolean); inline;
-    procedure PaintRowLinks(const ACanvas: TfpgCanvas; AViewRow: Integer; const ALine: TTermCellLine);
+    procedure PaintCell(const ACanvas: TfpgCanvasBase; ACol, AViewRow: Integer; const ACell: TTermCell; AHasCursor: Boolean); inline;
+    procedure PaintRowLinks(const ACanvas: TfpgCanvasBase; AViewRow: Integer; const ALine: TTermCellLine);
     function PixelToCell(X, Y: Integer): TTermCellPos;
     function TryMouseReport(x, y: Integer; shiftstate: TShiftState;
       AButton: TTermMouseButton; APressed, AMotion: Boolean): Boolean;
@@ -117,6 +181,18 @@ type
     procedure OpenURI(const AURI: string);
     procedure SetHoverLink(ANewLink: Integer);
     procedure InvalidateLinkRows(ALinkA, ALinkB: Integer);
+    { Grid cache machinery. }
+    procedure MarkGridDirtyAll; inline;
+    procedure MarkGridScreenRows(ASTop, ASBot: Integer);
+    procedure EnsureGridImage(AW, AH: Integer);
+    procedure RenderGridRows(AViewTop, AViewBot: Integer);
+    procedure ScrollGridCache(ADeltaRows: Integer);
+    procedure UpdateGridCache;
+    procedure BlitGrid;
+    procedure PaintCursorOverlay;
+    procedure PaintHoverOverlay;
+    procedure SetDefaultFGColor(AValue: TfpgColor);
+    procedure SetDefaultBGColor(AValue: TfpgColor);
   protected
     procedure HandlePaint; override;
     procedure HandleResize(AWidth, AHeight: TfpgCoord); override;
@@ -146,8 +222,8 @@ type
     property CursorStyle: TCursorStyle read FCursorStyle write FCursorStyle;
     { Default fg/bg used when a cell carries the terminal's default colour.
       Profiles set these; call Invalidate after changing to repaint. }
-    property DefaultFGColor: TfpgColor read FDefaultFGColor write FDefaultFGColor;
-    property DefaultBGColor: TfpgColor read FBackgroundColor write FBackgroundColor;
+    property DefaultFGColor: TfpgColor read FDefaultFGColor write SetDefaultFGColor;
+    property DefaultBGColor: TfpgColor read FBackgroundColor write SetDefaultBGColor;
     { Copy/paste exposed so an app keymap can bind them to configurable chords.
       CopySelection only copies when there is a selection (returns whether it
       did), so a "smart Ctrl+C" can fall through to SIGINT when nothing is
@@ -184,7 +260,95 @@ type
 implementation
 
 uses
-  Math, process;
+  Math, process, agg_2D;
+
+type
+  { Layout-compatible twin of fpg_hybrid_canvas.THybridCanvas.  That canvas
+    exposes no accessor for its window buffer and its only public image entry
+    point (DrawImagePart) goes through AggPas transformImage — a per-pixel
+    affine span transform that is far too slow for a per-frame full-grid blit.
+    We instead hard-cast the live canvas to this twin to reach FBufData and
+    copy our cached image straight in (a plain memcpy, the fast path AggPas
+    only otherwise reaches via the non-exposed copyImage).
+
+    The field list below MUST mirror THybridCanvas's private fields exactly,
+    in order, so the offsets line up.  Both derive from TfpgCanvasBase under
+    the same {$mode objfpc}{$H+} default alignment, so the inherited part and
+    these fields land at identical offsets. }
+  THybridCanvasHack = class(TfpgCanvasBase)
+  public
+    FAgg: agg_2D.Agg2D;
+    FBufferManager: IBufferManager;
+    FCurrentTextColor: TfpgColor;
+    FWindowAttached: Boolean;
+    FAttachedWindow: TfpgWindowBase;
+    FBufData: Pointer;
+    FBufStride: Integer;
+    FBufWidth: Integer;
+    FBufHeight: Integer;
+    { Block-copy AImg's top-left AUsedW x AUsedH region into the window buffer
+      at this canvas's widget origin.  No blend, no interpolation. }
+    procedure BlitImageDirect(AImg: TfpgImage; AUsedW, AUsedH: Integer);
+    { Confirm our overlaid fields actually line up with the real canvas by
+      writing a sentinel through FBufData and reading it back via the canvas's
+      own Pixels[] accessor.  Guards against a silent layout mismatch. }
+    function  LayoutMatches: Boolean;
+  end;
+
+function THybridCanvasHack.LayoutMatches: Boolean;
+const
+  SENTINEL_BGRA = LongWord($FF123456);   { B=$56 G=$34 R=$12, opaque }
+var
+  saved: TfpgColor;
+  ox, oy: Integer;
+  p: PLongWord;
+begin
+  Result := False;
+  if FBufData = nil then
+    Exit;
+  ox := FDeltaX;
+  oy := FDeltaY;
+  { Plausibility gate before touching the pointer: bogus offsets would surface
+    as nonsensical buffer geometry here. }
+  if (FBufWidth <= 0) or (FBufHeight <= 0) or (FBufWidth > 100000)
+     or (FBufHeight > 100000) or (FBufStride < FBufWidth * 4)
+     or (ox < 0) or (oy < 0) or (ox >= FBufWidth) or (oy >= FBufHeight) then
+    Exit;
+  saved := Pixels[0, 0];                  { GetPixel reads FBufData+deltas }
+  p := PLongWord(PByte(FBufData) + oy * FBufStride + ox * 4);
+  p^ := SENTINEL_BGRA;
+  { GetPixel returns $00RRGGBB, so the sentinel reads back as $00123456. }
+  Result := (Pixels[0, 0] and $00FFFFFF) = $00123456;
+  Pixels[0, 0] := saved;
+end;
+
+procedure THybridCanvasHack.BlitImageDirect(AImg: TfpgImage; AUsedW, AUsedH: Integer);
+var
+  y, rowBytes, ox, oy, srcStride: Integer;
+  src, dst: PByte;
+begin
+  if FBufData = nil then
+    Exit;
+  { For alien (virtual) widgets DoBeginDraw offsets FBufData to the widget
+    origin and zeroes the deltas, but honour FDeltaX/FDeltaY anyway in case a
+    given backend leaves the origin at the parent and the delta non-zero. }
+  ox := FDeltaX;
+  oy := FDeltaY;
+  rowBytes := Min(AUsedW, FBufWidth - ox) * 4;
+  if rowBytes <= 0 then
+    Exit;
+  srcStride := AImg.Width * 4;
+  for y := 0 to AUsedH - 1 do
+  begin
+    if oy + y >= FBufHeight then
+      Break;
+    if oy + y < 0 then
+      Continue;
+    src := PByte(AImg.ImageData) + y * srcStride;
+    dst := PByte(FBufData) + (oy + y) * FBufStride + ox * 4;
+    Move(src^, dst^, rowBytes);
+  end;
+end;
 
 
 const
@@ -201,6 +365,169 @@ const
   CONTEXT_COPY_HTML_ALL = 6;
 
 
+{ fpgColorToRGB yields $00RRGGBB whose low 24 bits already sit as B,G,R in
+  little-endian memory — exactly the BGRA byte order AggPas and the glyph cache
+  use.  Forcing alpha to $FF keeps every pixel opaque so the image blit takes
+  AggPas's straight-copy fast-path instead of the per-pixel alpha blend. }
+function ColorToOpaqueBGRA(c: TfpgColor): LongWord; inline;
+begin
+  Result := (fpgColorToRGB(c) and $00FFFFFF) or $FF000000;
+end;
+
+{ TTermImageCanvas }
+
+procedure TTermImageCanvas.SetTarget(AImage: TfpgImage; AUsedW, AUsedH: Integer);
+begin
+  FData := PByte(AImage.ImageData);
+  FW := AImage.Width;
+  FH := AImage.Height;
+  FStride := FW * 4;
+  FClipX1 := 0;
+  FClipY1 := 0;
+  FClipX2 := AUsedW;
+  FClipY2 := AUsedH;
+end;
+
+procedure TTermImageCanvas.FillSpan(AX, AY, AW: Integer);
+var
+  x1, x2: Integer;
+  p: PLongWord;
+begin
+  if (AY < FClipY1) or (AY >= FClipY2) or (AY < 0) or (AY >= FH) then
+    Exit;
+  x1 := AX;
+  x2 := AX + AW;
+  if x1 < FClipX1 then x1 := FClipX1;
+  if x2 > FClipX2 then x2 := FClipX2;
+  if x1 < 0 then x1 := 0;
+  if x2 > FW then x2 := FW;
+  if x2 <= x1 then
+    Exit;
+  p := PLongWord(FData + AY * FStride + x1 * 4);
+  FillDWord(p^, x2 - x1, FColorBGRA);
+end;
+
+procedure TTermImageCanvas.DoSetColor(cl: TfpgColor);
+begin
+  FColor := cl;
+  FColorBGRA := ColorToOpaqueBGRA(cl);
+end;
+
+procedure TTermImageCanvas.DoSetTextColor(cl: TfpgColor);
+begin
+  FTextColor := cl;
+end;
+
+procedure TTermImageCanvas.DoSetFontRes(fntres: TfpgFontResourceBase);
+begin
+  { TfpgCanvasBase.SetFont already stored fntres in FFont; nothing else to do. }
+end;
+
+procedure TTermImageCanvas.DoFillRectangle(x, y, w, h: TfpgCoord);
+var
+  yy: Integer;
+begin
+  if FData = nil then
+    Exit;
+  for yy := y to y + h - 1 do
+    FillSpan(x, yy, w);
+end;
+
+procedure TTermImageCanvas.DoDrawLine(x1, y1, x2, y2: TfpgCoord);
+var
+  i, dx, dy, sx, sy, err, e2: Integer;
+begin
+  if FData = nil then
+    Exit;
+  if y1 = y2 then
+  begin
+    if x2 >= x1 then FillSpan(x1, y1, x2 - x1 + 1)
+    else FillSpan(x2, y1, x1 - x2 + 1);
+    Exit;
+  end;
+  if x1 = x2 then
+  begin
+    if y2 < y1 then begin i := y1; y1 := y2; y2 := i; end;
+    for i := y1 to y2 do
+      FillSpan(x1, i, 1);
+    Exit;
+  end;
+  { Generic Bresenham — the grid renderer only ever draws horizontals, so this
+    is just a safety net. }
+  dx := Abs(x2 - x1);
+  dy := -Abs(y2 - y1);
+  if x1 < x2 then sx := 1 else sx := -1;
+  if y1 < y2 then sy := 1 else sy := -1;
+  err := dx + dy;
+  while True do
+  begin
+    FillSpan(x1, y1, 1);
+    if (x1 = x2) and (y1 = y2) then
+      Break;
+    e2 := 2 * err;
+    if e2 >= dy then begin err := err + dy; x1 := x1 + sx; end;
+    if e2 <= dx then begin err := err + dx; y1 := y1 + sy; end;
+  end;
+end;
+
+procedure TTermImageCanvas.DoDrawString(x, y: TfpgCoord; const txt: string);
+begin
+  if (FData = nil) or (FFont = nil) or (Length(txt) = 0) then
+    Exit;
+  { AY is the baseline (top + ascent), matching the window canvas. }
+  FFont.DrawTextToBuffer(FData, FStride, FW, FH,
+    x, y + FFont.GetAscent, txt, FTextColor,
+    FClipX1, FClipY1, FClipX2, FClipY2);
+end;
+
+procedure TTermImageCanvas.DoSetClipRect(const ARect: TfpgRect);
+begin
+  FClipX1 := ARect.Left;
+  FClipY1 := ARect.Top;
+  FClipX2 := ARect.Left + ARect.Width;
+  FClipY2 := ARect.Top + ARect.Height;
+end;
+
+function TTermImageCanvas.DoGetClipRect: TfpgRect;
+begin
+  Result.SetRect(FClipX1, FClipY1, FClipX2 - FClipX1, FClipY2 - FClipY1);
+end;
+
+procedure TTermImageCanvas.DoAddClipRect(const ARect: TfpgRect);
+begin
+  if ARect.Left > FClipX1 then FClipX1 := ARect.Left;
+  if ARect.Top  > FClipY1 then FClipY1 := ARect.Top;
+  if ARect.Left + ARect.Width  < FClipX2 then FClipX2 := ARect.Left + ARect.Width;
+  if ARect.Top  + ARect.Height < FClipY2 then FClipY2 := ARect.Top + ARect.Height;
+end;
+
+procedure TTermImageCanvas.DoClearClipRect;
+begin
+  FClipX1 := 0;
+  FClipY1 := 0;
+  FClipX2 := FW;
+  FClipY2 := FH;
+end;
+
+{ --- inert stubs: the grid renderer never calls these --- }
+procedure TTermImageCanvas.DoSetLineStyle(awidth: integer; astyle: TfpgLineStyle); begin end;
+procedure TTermImageCanvas.DoXORFillRectangle(col: TfpgColor; x, y, w, h: TfpgCoord); begin end;
+procedure TTermImageCanvas.DoFillTriangle(x1, y1, x2, y2, x3, y3: TfpgCoord); begin end;
+procedure TTermImageCanvas.DoDrawRectangle(x, y, w, h: TfpgCoord); begin end;
+procedure TTermImageCanvas.DoDrawImagePart(x, y: TfpgCoord; img: TfpgImageBase; xi, yi, w, h: integer); begin end;
+procedure TTermImageCanvas.DoDrawArc(x, y, w, h: TfpgCoord; a1, a2: double); begin end;
+procedure TTermImageCanvas.DoFillArc(x, y, w, h: TfpgCoord; a1, a2: double); begin end;
+procedure TTermImageCanvas.DoDrawPolygon(const Points: array of TPoint); begin end;
+function  TTermImageCanvas.GetPixel(X, Y: integer): TfpgColor; begin Result := 0; end;
+procedure TTermImageCanvas.SetPixel(X, Y: integer; const AValue: TfpgColor); begin end;
+procedure TTermImageCanvas.DoBeginDraw(awidget: TfpgWidgetBase; CanvasTarget: TfpgCanvasBase); begin end;
+procedure TTermImageCanvas.DoPutBufferToScreen(x, y, w, h: TfpgCoord); begin end;
+procedure TTermImageCanvas.DoEndDraw; begin end;
+function  TTermImageCanvas.GetBufferAllocated: Boolean; begin Result := FData <> nil; end;
+procedure TTermImageCanvas.DoAllocateBuffer; begin end;
+procedure TTermImageCanvas.DoRestoreFromBuffer(const ARect: TfpgRect); begin end;
+
+
 constructor TTerminalFPGUIView.Create(AOwner: TComponent);
 begin
   inherited Create(AOwner);
@@ -214,6 +541,16 @@ begin
   FSelectionFGColor := clBlack;
   FSelectionBGColor := $00D7FF;
   FCursorBlinkVisible := True;
+  FGridCanvas := TTermImageCanvas.Create(nil);
+  FGridImage := nil;
+  FGridAllocW := 0;
+  FGridAllocH := 0;
+  FGridValid := False;
+  FFastBlit := 0;
+  FGridDirtyAll := True;
+  FGridTopRow := 0;
+  FDirtySTop := 1;     { empty band (Top > Bot) }
+  FDirtySBot := 0;
   // Created scrollbar before Width is set
   FScrollbar := TfpgScrollBar.Create(Self);
   FScrollbar.Parent := Self;
@@ -241,6 +578,8 @@ begin
   DetachController;
   FreeAndNil(FTimer);
   FreeAndNil(FCursorTimer);
+  FreeAndNil(FGridCanvas);
+  FreeAndNil(FGridImage);
   inherited Destroy;
 end;
 
@@ -262,6 +601,7 @@ begin
     FShellExited := False;
     FTimer.Enabled := True;
   end;
+  MarkGridDirtyAll;
   Repaint;
 end;
 
@@ -352,6 +692,7 @@ begin
     else
       WriteExitBanner;
     UpdateScrollBar;
+    MarkGridDirtyAll;
     Repaint;
   end;
 end;
@@ -368,7 +709,6 @@ end;
 
 procedure TTerminalFPGUIView.CoreInvalidate(Sender: TObject; const ARect: TTermRect);
 var
-  L, T, W, H: Integer;
   HistCount: Integer;
   SelMinVRow, SelMaxVRow: Integer;
 begin
@@ -403,45 +743,13 @@ begin
     end;
   end;
 
-  L := ARect.Left * FCharWidth;
-  T := (HistCount + ARect.Top - FTopRow) * FCharHeight;
-  W := (ARect.Right - ARect.Left + 1) * FCharWidth;
-  H := (ARect.Bottom - ARect.Top + 1) * FCharHeight;
-
-  if (W <= 0) or (H <= 0) then
-    Exit;
-
-  if T + H <= 0 then
-    Exit;
-
-  if T >= ActualHeight then
-    Exit;
-
-  if L < 0 then
-  begin
-    W := W + L;
-    L := 0;
-  end;
-
-  if T < 0 then
-  begin
-    H := H + T;
-    T := 0;
-  end;
-
-  if L + W > ClientWidth then
-    W := ClientWidth - L;
-
-  if T + H > ActualHeight then
-    H := ActualHeight - T;
-
-  if (W > 0) and (H > 0) then
-    { HandlePaint repaints every visible cell in one pass; if we only invalidate
-      the changed rect, fpGUI clips the rest away and the prior contents of those
-      cells stay on screen.  Invalidate the entire client area so the full grid
-      gets repainted.  (Resize works precisely because it triggers a full
-      invalidate.) }
-    Invalidate;
+  { Record the changed band in screen-row coordinates (stable across FTopRow /
+    history growth) so HandlePaint re-bakes only those rows of the grid cache.
+    We still Invalidate the whole client: as a virtual child our invalidation
+    bubbles to the parent which clears the shared buffer regardless — but the
+    cache spares us re-rendering glyphs for the unchanged rows. }
+  MarkGridScreenRows(ARect.Top, ARect.Bottom);
+  Invalidate;
 end;
 
 procedure TTerminalFPGUIView.CoreBell(Sender: TObject);
@@ -690,6 +998,7 @@ begin
      if Assigned(FOnFontChanged) then
        FOnFontChanged(Self);
   end;
+  MarkGridDirtyAll;
   UpdateMetrics;
   SyncSizeToController;
 end;
@@ -704,6 +1013,7 @@ begin
     FEmojiFontDesc := S;
     if Assigned(FOnFontChanged) then
       FOnFontChanged(Self);
+    MarkGridDirtyAll;
     Repaint;
   end;
 end;
@@ -796,7 +1106,7 @@ begin
     Result := ' ';
 end;
 
-procedure TTerminalFPGUIView.PaintCell(const ACanvas: TfpgCanvas; ACol, AViewRow: Integer; const ACell: TTermCell; AHasCursor: Boolean); inline;
+procedure TTerminalFPGUIView.PaintCell(const ACanvas: TfpgCanvasBase; ACol, AViewRow: Integer; const ACell: TTermCell; AHasCursor: Boolean); inline;
 var
   R: TfpgRect;
   FG, BG: TfpgColor;
@@ -866,7 +1176,7 @@ begin
     ACanvas.DrawLine(R.Left, R.Bottom, R.Right, R.Bottom);
 end;
 
-procedure TTerminalFPGUIView.PaintRowLinks(const ACanvas: TfpgCanvas;
+procedure TTerminalFPGUIView.PaintRowLinks(const ACanvas: TfpgCanvasBase;
   AViewRow: Integer; const ALine: TTermCellLine);
 { Draw OSC 8 hyperlink underlines for one row, coalescing adjacent cells that
   share a link id into a single run.  A run is solid when hovered, otherwise a
@@ -1105,78 +1415,320 @@ begin
 end;
 
 procedure TTerminalFPGUIView.HandlePaint;
-var
-  Row, Col, ViewRows, StartRow: Integer;
-  Line: TTermCellLine;
-  Cell: TTermCell;
-  CursorRect: TfpgRect;
-  CursorViewRow: Integer;
-  CursorVirtualRow: Integer;
-  HostsCursor: Boolean;
 begin
   inherited HandlePaint;
   UpdateMetrics;
 
   Canvas.BeginDraw;
   try
-    Canvas.Color := FBackgroundColor;
-    Canvas.FillRectangle(0, 0, ClientWidth, ActualHeight);
-    Canvas.SetFont(fpgApplication.FontManager.GetFont(FFontDesc));
-
     if FController <> nil then
     begin
       if FController.Core.InAltBuffer then
         FTopRow := FController.Core.HistoryCount;
-      ViewRows := RowsVisible;
-      StartRow := FTopRow;
 
-      CursorVirtualRow := FController.Core.HistoryCount + FController.Core.Cursor.Row;
-      CursorViewRow := CursorVirtualRow - FTopRow;
+      { Re-bake only what changed into the private grid image, then blit it.
+        The cursor and hover highlight are drawn as overlays on top so a blink
+        or a hover change costs a cheap re-blit, not a full glyph re-render. }
+      UpdateGridCache;
+      BlitGrid;
 
-      for Row := 0 to ViewRows - 1 do
+      { Bottom remainder (client height not an exact multiple of a cell) is not
+        covered by the grid image; paint it in the background colour. }
+      if FGridH < ActualHeight then
       begin
-        Line := GetVirtualLine(StartRow + Row);
-        if Length(Line) = 0 then
-          Continue;
-
-        for Col := 0 to Min(High(Line), ColsVisible - 1) do
-        begin
-          HostsCursor := FController.Core.Cursor.Visible
-                    and (FCursorStyle = csBlock)
-                    and (FController.Core.Cursor.Col = Col)
-                    and (StartRow+Row = CursorVirtualRow);
-          Cell := Line[Col];
-          PaintCell(Canvas, Col, Row, Cell, HostsCursor);
-        end;
-
-        { Hyperlink underlines drawn after the cells, coalesced per link run so
-          the dotted phase is continuous across cell boundaries. }
-        PaintRowLinks(Canvas, Row, Line);
+        Canvas.Color := FBackgroundColor;
+        Canvas.FillRectangle(0, FGridH, ClientWidth, ActualHeight - FGridH);
       end;
 
-      if FController.Core.Cursor.Visible and FCursorBlinkVisible then
-      begin
-        // Set Above
-        //CursorVirtualRow := FController.Core.HistoryCount + FController.Core.Cursor.Row;
-        //CursorViewRow := CursorVirtualRow - FTopRow;
-
-        if (CursorViewRow >= 0) and (CursorViewRow < ViewRows) then
-        begin
-          CursorRect := CellRect(FController.Core.Cursor.Col, CursorViewRow);
-          Canvas.Color := $00A0A0A0;
-          case FCursorStyle of
-            csUnderscore:
-              Canvas.FillRectangle(CursorRect.Left, CursorRect.Top + FCharHeight - 2, FCharWidth, 2);
-            csBlock:
-              begin
-                //Canvas.FillRectangle(CursorRect.Left, CursorRect.Top, FCharWidth, FCharHeight);
-              end;
-          end;
-        end;
-      end;
+      PaintCursorOverlay;
+      PaintHoverOverlay;
+    end
+    else
+    begin
+      Canvas.Color := FBackgroundColor;
+      Canvas.FillRectangle(0, 0, ClientWidth, ActualHeight);
     end;
   finally
     Canvas.EndDraw;
+  end;
+end;
+
+procedure TTerminalFPGUIView.MarkGridDirtyAll;
+begin
+  FGridDirtyAll := True;
+end;
+
+procedure TTerminalFPGUIView.SetDefaultFGColor(AValue: TfpgColor);
+begin
+  FDefaultFGColor := AValue;
+  MarkGridDirtyAll;   { default colour is baked into the grid cache }
+end;
+
+procedure TTerminalFPGUIView.SetDefaultBGColor(AValue: TfpgColor);
+begin
+  FBackgroundColor := AValue;
+  MarkGridDirtyAll;
+end;
+
+procedure TTerminalFPGUIView.MarkGridScreenRows(ASTop, ASBot: Integer);
+begin
+  if ASTop > ASBot then
+    Exit;
+  if FDirtySTop > FDirtySBot then
+  begin
+    FDirtySTop := ASTop;
+    FDirtySBot := ASBot;
+  end
+  else
+  begin
+    if ASTop < FDirtySTop then FDirtySTop := ASTop;
+    if ASBot > FDirtySBot then FDirtySBot := ASBot;
+  end;
+end;
+
+procedure TTerminalFPGUIView.EnsureGridImage(AW, AH: Integer);
+var
+  NW, NH: Integer;
+begin
+  if AW < 1 then AW := 1;
+  if AH < 1 then AH := 1;
+  if (FGridImage <> nil) and (FGridAllocW >= AW) and (FGridAllocH >= AH) then
+    Exit;
+  { Grow-only: never shrink the buffer, just enlarge it to fit. }
+  NW := Max(AW, FGridAllocW);
+  NH := Max(AH, FGridAllocH);
+  FreeAndNil(FGridImage);
+  FGridImage := TfpgImage.Create;
+  FGridImage.AllocateImage(32, NW, NH);
+  FGridImage.UpdateImage;
+  FGridAllocW := NW;
+  FGridAllocH := NH;
+  FGridValid := False;   { fresh buffer holds nothing usable }
+end;
+
+{ Re-bake view rows [AViewTop..AViewBot] of the grid into FGridImage.  The
+  cursor is excluded (drawn as an overlay) and hyperlink underlines are baked
+  as plain dotted runs (the hover solid line is also an overlay), so neither a
+  blink nor a hover change forces a re-render. }
+procedure TTerminalFPGUIView.RenderGridRows(AViewTop, AViewBot: Integer);
+var
+  Row, Col, MaxCol, SavedHover: Integer;
+  Line: TTermCellLine;
+  Cell: TTermCell;
+  ClipR: TfpgRect;
+begin
+  if FController = nil then
+    Exit;
+  if AViewTop < 0 then AViewTop := 0;
+  if AViewBot > RowsVisible - 1 then AViewBot := RowsVisible - 1;
+  if AViewTop > AViewBot then
+    Exit;
+
+  ClipR.SetRect(0, AViewTop * FCharHeight, FGridW,
+                (AViewBot - AViewTop + 1) * FCharHeight);
+  FGridCanvas.SetClipRect(ClipR);
+
+  { Clear the band first so blank cells / short lines / the column remainder
+    show the background colour. }
+  FGridCanvas.Color := FBackgroundColor;
+  FGridCanvas.FillRectangle(ClipR);
+
+  SavedHover := FHoverLinkId;
+  FHoverLinkId := 0;
+  try
+    for Row := AViewTop to AViewBot do
+    begin
+      Line := GetVirtualLine(FTopRow + Row);
+      if Length(Line) = 0 then
+        Continue;
+      MaxCol := Min(High(Line), ColsVisible - 1);
+      for Col := 0 to MaxCol do
+      begin
+        Cell := Line[Col];
+        PaintCell(FGridCanvas, Col, Row, Cell, False);
+      end;
+      PaintRowLinks(FGridCanvas, Row, Line);
+    end;
+  finally
+    FHoverLinkId := SavedHover;
+  end;
+end;
+
+{ Shift the cached grid image by ADeltaRows (positive = viewport advanced, so
+  content moves up) with a single memmove, then re-bake only the rows the shift
+  exposed.  Lets scrollback navigation reuse the already-rendered glyphs. }
+procedure TTerminalFPGUIView.ScrollGridCache(ADeltaRows: Integer);
+var
+  RV, stride, shiftPx, movePx: Integer;
+  base: PByte;
+begin
+  RV := RowsVisible;
+  if (FGridImage = nil) or (Abs(ADeltaRows) >= RV) then
+  begin
+    RenderGridRows(0, RV - 1);
+    Exit;
+  end;
+  stride := FGridImage.Width * 4;
+  base := PByte(FGridImage.ImageData);
+  shiftPx := Abs(ADeltaRows) * FCharHeight;
+  movePx := (RV - Abs(ADeltaRows)) * FCharHeight;
+  if movePx > 0 then
+  begin
+    if ADeltaRows > 0 then
+    begin
+      Move((base + shiftPx * stride)^, base^, movePx * stride);
+      RenderGridRows(RV - ADeltaRows, RV - 1);
+    end
+    else
+    begin
+      Move(base^, (base + shiftPx * stride)^, movePx * stride);
+      RenderGridRows(0, (-ADeltaRows) - 1);
+    end;
+  end
+  else
+    RenderGridRows(0, RV - 1);
+end;
+
+{ Decide the minimal work to make FGridImage current, then do it. }
+procedure TTerminalFPGUIView.UpdateGridCache;
+var
+  RV, GW, GH, D, vTop, vBot: Integer;
+  ContentDirty: Boolean;
+begin
+  if FController = nil then
+    Exit;
+
+  RV := RowsVisible;
+  GW := ClientWidth;
+  GH := RV * FCharHeight;
+  if GW < 1 then GW := 1;
+  if GH < 1 then GH := 1;
+
+  EnsureGridImage(GW, GH);
+  FGridCanvas.SetTarget(FGridImage, GW, GH);
+  FGridW := GW;
+  FGridH := GH;
+
+  ContentDirty := FDirtySTop <= FDirtySBot;
+
+  if FGridDirtyAll or (not FGridValid) then
+    RenderGridRows(0, RV - 1)
+  else if ContentDirty then
+  begin
+    if FTopRow <> FGridTopRow then
+      { content changed and the viewport scrolled in the same tick — re-bake
+        the whole visible grid rather than untangle the two. }
+      RenderGridRows(0, RV - 1)
+    else
+    begin
+      vTop := FController.Core.HistoryCount + FDirtySTop - FTopRow;
+      vBot := FController.Core.HistoryCount + FDirtySBot - FTopRow;
+      RenderGridRows(vTop, vBot);
+    end;
+  end
+  else if FTopRow <> FGridTopRow then
+  begin
+    D := FTopRow - FGridTopRow;
+    if Abs(D) >= RV then
+      RenderGridRows(0, RV - 1)
+    else
+      ScrollGridCache(D);
+  end;
+  { else: nothing changed — keep the cache (cursor blink / hover only). }
+
+  FGridValid := True;
+  FGridTopRow := FTopRow;
+  FGridDirtyAll := False;
+  FDirtySTop := 1;   { reset to empty }
+  FDirtySBot := 0;
+end;
+
+procedure TTerminalFPGUIView.BlitGrid;
+begin
+  if FGridImage = nil then
+    Exit;
+  { Fast path: when the live canvas is the AggPas hybrid canvas (always, on this
+    build) copy the cached image straight into its window buffer.  The first
+    time, verify the hard-cast field layout actually matches before trusting it;
+    fall back to the (slow) transformImage blit otherwise. }
+  if FFastBlit = 0 then
+  begin
+    if (Canvas.ClassName = 'THybridCanvas')
+       and THybridCanvasHack(Pointer(Canvas)).LayoutMatches then
+      FFastBlit := 1
+    else
+      FFastBlit := 2;
+  end;
+
+  if FFastBlit = 1 then
+    THybridCanvasHack(Pointer(Canvas)).BlitImageDirect(FGridImage, FGridW, FGridH)
+  else
+    Canvas.DrawImagePart(0, 0, FGridImage, 0, 0, FGridW, FGridH);
+end;
+
+procedure TTerminalFPGUIView.PaintCursorOverlay;
+var
+  CursorVirtualRow, CursorViewRow: Integer;
+  Line: TTermCellLine;
+  Cell: TTermCell;
+  R: TfpgRect;
+begin
+  if (FController = nil) or (not FController.Core.Cursor.Visible)
+     or (not FCursorBlinkVisible) then
+    Exit;
+  CursorVirtualRow := FController.Core.HistoryCount + FController.Core.Cursor.Row;
+  CursorViewRow := CursorVirtualRow - FTopRow;
+  if (CursorViewRow < 0) or (CursorViewRow >= RowsVisible) then
+    Exit;
+
+  case FCursorStyle of
+    csBlock:
+      begin
+        Line := GetVirtualLine(CursorVirtualRow);
+        if (FController.Core.Cursor.Col >= 0)
+           and (FController.Core.Cursor.Col <= High(Line)) then
+          Cell := Line[FController.Core.Cursor.Col];
+        { else Cell stays default-initialised (blank), giving a plain block. }
+        PaintCell(Canvas, FController.Core.Cursor.Col, CursorViewRow, Cell, True);
+      end;
+    csUnderscore:
+      begin
+        R := CellRect(FController.Core.Cursor.Col, CursorViewRow);
+        Canvas.Color := $00A0A0A0;
+        Canvas.FillRectangle(R.Left, R.Top + FCharHeight - 2, FCharWidth, 2);
+      end;
+  end;
+end;
+
+procedure TTerminalFPGUIView.PaintHoverOverlay;
+var
+  Row, Col, MaxCol, RunStart, RunRight, Y: Integer;
+  Line: TTermCellLine;
+begin
+  if (FController = nil) or (FHoverLinkId = 0) then
+    Exit;
+  for Row := 0 to RowsVisible - 1 do
+  begin
+    Line := GetVirtualLine(FTopRow + Row);
+    if Length(Line) = 0 then
+      Continue;
+    MaxCol := Min(High(Line), ColsVisible - 1);
+    Y := Row * FCharHeight + FCharHeight - 1;
+    Col := 0;
+    while Col <= MaxCol do
+    begin
+      if Line[Col].LinkId <> FHoverLinkId then
+      begin
+        Inc(Col);
+        Continue;
+      end;
+      RunStart := Col;
+      while (Col <= MaxCol) and (Line[Col].LinkId = FHoverLinkId) do
+        Inc(Col);
+      RunRight := Col * FCharWidth - 1;
+      Canvas.Color := MapColor(Line[RunStart].FG, False);
+      Canvas.DrawLine(RunStart * FCharWidth, Y, RunRight + 1, Y);
+    end;
   end;
 end;
 
@@ -1195,6 +1747,7 @@ begin
     FScrollBar.Position := FScrollBar.Max;
     FTopRow := FScrollBar.Position;
   end;
+  MarkGridDirtyAll;
   Repaint;
 end;
 
@@ -1438,7 +1991,10 @@ begin
   FMouseDownY := Y;
   FMouseDownAnchor := PixelToCell(x, y);
   if HadSelection then
+  begin
+    MarkGridDirtyAll;   { selection highlight is baked into the grid cache }
     Repaint;
+  end;
 end;
 
 procedure TTerminalFPGUIView.HandleMouseMove(x, y: integer; btnstate: word;
@@ -1502,6 +2058,7 @@ begin
   begin
     Cell := PixelToCell(x, y);
     FSelection.Focus := Cell;
+    MarkGridDirtyAll;   { selection highlight is baked into the grid cache }
     Repaint;
   end;
 end;
@@ -1546,6 +2103,7 @@ begin
   begin
     FSelection.Focus := PixelToCell(x, y);
     FSelection.Selecting := False;
+    MarkGridDirtyAll;   { selection highlight is baked into the grid cache }
     Repaint;
   end;
 end;
