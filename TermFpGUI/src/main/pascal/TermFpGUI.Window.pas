@@ -30,12 +30,13 @@ uses
   fpg_base, fpg_main, fpg_form, fpg_menu, fpg_dialogs, fpg_panel,
   fpg_stylemanager,
   Terminal.Controller, Terminal.Core, Terminal.Parser, Terminal.View.fpGUI,
-  TermFpGUI.Actions, TermFpGUI.Config, TermFpGUI.TabBar;
+  TermFpGUI.Actions, TermFpGUI.Config, TermFpGUI.TabBar, TermFpGUI.Drawer;
 
 type
   { One terminal session living in one tab.  Parallel-indexed with FTabBar. }
   TTermTab = class
     View: TTerminalFPGUIView;
+    Drawer: TTermDrawer;          // hover side-panel, nil when profile disables it
     NeedStart: Boolean;
     function Controller: TTerminalController;
   end;
@@ -55,8 +56,16 @@ type
     FFlashSaved: string;
     FLinkHoverSaved: string;       // window title stashed while hovering a link
     FLinkHovering: Boolean;
+    { Tabs whose shell exited are torn down here, on a one-shot timer, rather
+      than synchronously inside the view's pump-timer callback — freeing a view
+      (and its timer) from within its own timer fire is a use-after-free. }
+    FDisposeTimer: TfpgTimer;
+    FPendingDispose: TFPList;      // of TTermTab awaiting deferred disposal
+    procedure QueueDispose(ATab: TTermTab);
+    procedure DisposeTick(Sender: TObject);
     procedure BuildTabMenu;
     procedure FormShow(Sender: TObject);
+    procedure FormClose(Sender: TObject; var CloseAction: TCloseAction);
     { tab bar events }
     procedure TabSelected(AIndex: Integer);
     procedure TabRightClicked(AIndex, AX, AY: Integer);
@@ -86,6 +95,12 @@ type
     procedure ViewLinkHover(Sender: TObject; ALinkId: Integer; const AURI: string);
     procedure ViewLinkLeave(Sender: TObject; ALinkId: Integer; const AURI: string);
     procedure ViewLinkClick(Sender: TObject; ALinkId: Integer; const AURI: string; var AHandled: Boolean);
+    procedure ViewEdgeHover(Sender: TObject; AEdge: TTermViewEdge);
+    procedure ViewClicked(Sender: TObject; var AHandled: Boolean);
+    procedure DrawerHostKey(Sender: TObject; AKeyCode: Word; AShift: TShiftState; var AHandled: Boolean);
+    procedure DrawerPersist;
+    procedure SetupTabDrawer(ATab: TTermTab);
+    procedure ApplyConfigToTabs;
     procedure CoreTitle(Sender: TObject; const ATitle: string);
     procedure CoreBell(Sender: TObject);
     procedure ParserOSC(Sender: TObject; ACode: Integer; const APayload: RawByteString; var AHandled: Boolean);
@@ -153,7 +168,23 @@ begin
   FFlashTimer.OnTimer := @FlashTick;
   FFlashTimer.Enabled := False;
 
+  FPendingDispose := TFPList.Create;
+  FDisposeTimer := TfpgTimer.Create(1);   // one-shot; disabled inside its handler
+  FDisposeTimer.OnTimer := @DisposeTick;
+  FDisposeTimer.Enabled := False;
+
   OnShow := @FormShow;
+  { Free the window on close (fpGUI defers it safely via FPGM_FREEME for a
+    non-main form).  Torn-off windows are otherwise only hidden and never freed,
+    which strands their Wayland buffer manager in the present queue with a dead
+    surface -> SIGSEGV in FlushPendingPresents.  The main form's caFree just
+    terminates the loop (MainProc frees it). }
+  OnClose := @FormClose;
+end;
+
+procedure TTermWindow.FormClose(Sender: TObject; var CloseAction: TCloseAction);
+begin
+  CloseAction := caFree;
 end;
 
 { Explicitly lay out the two top-level children on every resize.  fpGUI's
@@ -178,7 +209,11 @@ begin
   if FTabs <> nil then
     for i := 0 to FTabs.Count - 1 do
       if TTermTab(FTabs[i]).View <> nil then
+      begin
         TTermTab(FTabs[i]).View.SetPosition(0, 0, vw, vh);
+        if TTermTab(FTabs[i]).Drawer <> nil then
+          TTermTab(FTabs[i]).Drawer.Layout;
+      end;
 end;
 
 destructor TTermWindow.Destroy;
@@ -188,11 +223,14 @@ var
   Ctrl: TTerminalController;
 begin
   FreeAndNil(FFlashTimer);
+  FreeAndNil(FDisposeTimer);          { stop deferred disposal before teardown }
+  FreeAndNil(FPendingDispose);
   if FTabs <> nil then
   begin
     for i := 0 to FTabs.Count - 1 do
     begin
       Tab := TTermTab(FTabs[i]);
+      FreeAndNil(Tab.Drawer);
       Ctrl := Tab.Controller;
       if Tab.View <> nil then
         Tab.View.DetachController(True);
@@ -258,6 +296,8 @@ begin
   View.OnLinkHover := @ViewLinkHover;
   View.OnLinkLeave := @ViewLinkLeave;
   View.OnLinkClick := @ViewLinkClick;
+  View.OnEdgeHover := @ViewEdgeHover;
+  View.OnViewClick := @ViewClicked;
 
   if AController <> nil then
     Ctrl := AController
@@ -287,6 +327,8 @@ begin
   end;
 
   UpdateMinSize(View);                  // font is set, so cell metrics are known
+
+  SetupTabDrawer(Result);               // hover side-panel, if the profile enables it
 
   SelectTab(Idx);                       // shows this view, hides others
 
@@ -375,7 +417,11 @@ var
 begin
   ai := FTabBar.ActiveIndex;
   for i := 0 to FTabs.Count - 1 do
+  begin
     TTermTab(FTabs[i]).View.Visible := (i = ai);
+    if TTermTab(FTabs[i]).Drawer <> nil then
+      TTermTab(FTabs[i]).Drawer.SetActive(i = ai);
+  end;
   if (ai >= 0) and (ai < FTabs.Count) then
   begin
     WindowTitle := FTabBar.TitleOf(ai);
@@ -470,10 +516,8 @@ end;
 
 procedure TTermWindow.MiCloseTab(Sender: TObject);
 begin
-  if FMenuTab = nil then Exit;
-  DisposeTab(FMenuTab, True);
+  QueueDispose(FMenuTab);
   FMenuTab := nil;
-  if FTabs.Count = 0 then Close else SyncActive;
 end;
 
 procedure TTermWindow.MiMoveToWindow(Sender: TObject);
@@ -497,8 +541,10 @@ begin
   NewWin.AddTab(Ctrl, Title, False);
   NewWin.Show;
 
-  DisposeTab(Tab, False);               // controller already moved
-  if FTabs.Count = 0 then Close else SyncActive;
+  { Defer: this can run inside the old view's key handler. The controller is
+    already detached (Tab.Controller is now nil), so the deferred DisposeTab
+    won't touch the moved shell. }
+  QueueDispose(Tab);
 end;
 
 { Menu item text is "Profile:  Name" / "Theme:  Name"; take the part after ':'. }
@@ -559,16 +605,43 @@ begin
   finally
     Frm.Free;
   end;
+  ApplyConfigToTabs;                   { reflect edits live }
 end;
 
 { ---- per-tab callbacks ---- }
 
+{ Called from the view's pump-timer callback when its shell exits.  We must NOT
+  free the view here (that frees the timer we're running inside) — queue it and
+  tear it down from our own one-shot timer, after this event has returned. }
 procedure TTermWindow.ViewShellExit(Sender: TObject);
-var Tab: TTermTab;
 begin
-  Tab := TabForView(Sender);
-  if Tab = nil then Exit;
-  DisposeTab(Tab, True);
+  QueueDispose(TabForView(Sender));
+end;
+
+{ Defer a tab's teardown to the one-shot timer so it never runs synchronously
+  inside that tab's own view event (pump timer / key handler), where freeing the
+  view would pull the rug out from under the code still on the stack. }
+procedure TTermWindow.QueueDispose(ATab: TTermTab);
+begin
+  if ATab = nil then Exit;
+  if FPendingDispose.IndexOf(ATab) < 0 then
+    FPendingDispose.Add(ATab);
+  FDisposeTimer.Enabled := True;
+end;
+
+procedure TTermWindow.DisposeTick(Sender: TObject);
+var
+  i: Integer;
+  Tab: TTermTab;
+begin
+  FDisposeTimer.Enabled := False;
+  for i := 0 to FPendingDispose.Count - 1 do
+  begin
+    Tab := TTermTab(FPendingDispose[i]);
+    if FTabs.IndexOf(Tab) >= 0 then     { may have been closed another way }
+      DisposeTab(Tab, True);
+  end;
+  FPendingDispose.Clear;
   if FTabs.Count = 0 then Close else SyncActive;
 end;
 
@@ -664,6 +737,138 @@ begin
   AHandled := True;
 end;
 
+{ Resolve the active profile and, if it defines a drawer, create one for this
+  tab.  Each tab owns its own drawer instance (independent program). }
+procedure TTermWindow.SetupTabDrawer(ATab: TTermTab);
+var
+  Prof, ColorProf: TTermProfile;
+begin
+  if (FConfig = nil) or (ATab = nil) or (ATab.View = nil) then Exit;
+  Prof := FConfig.FindProfile(FConfig.ActiveProfile);
+  if (Prof = nil) and (FConfig.ProfileCount > 0) then
+    Prof := FConfig.Profiles[0];
+  if (Prof = nil) or (not Prof.DrawerEnabled) then Exit;
+  ColorProf := nil;
+  if Prof.DrawerColorProfile <> '' then
+    ColorProf := FConfig.FindProfile(Prof.DrawerColorProfile);
+  ATab.Drawer := TTermDrawer.Create(FContent, ATab.View, Prof, ColorProf);
+  ATab.Drawer.OnPersist := @DrawerPersist;
+  ATab.Drawer.OnHostKey := @DrawerHostKey;
+  ATab.Drawer.PrimeIfEager;
+end;
+
+{ Re-apply the (just-edited) active profile to every open tab — colours, font,
+  and drawer appearance — so Settings changes show without reopening tabs.
+  The hosted programs keep running; a changed drawer command takes effect on the
+  next open/relaunch. }
+procedure TTermWindow.ApplyConfigToTabs;
+var
+  i: Integer;
+  Prof, ColorProf: TTermProfile;
+  Tab: TTermTab;
+begin
+  if FConfig = nil then Exit;
+  Prof := FConfig.FindProfile(FConfig.ActiveProfile);
+  if (Prof = nil) and (FConfig.ProfileCount > 0) then
+    Prof := FConfig.Profiles[0];
+  if Prof = nil then Exit;
+
+  ColorProf := nil;
+  if Prof.DrawerColorProfile <> '' then
+    ColorProf := FConfig.FindProfile(Prof.DrawerColorProfile);
+
+  for i := 0 to FTabs.Count - 1 do
+  begin
+    Tab := TTermTab(FTabs[i]);
+    if Tab.View <> nil then
+    begin
+      Prof.ApplyTo(Tab.View);
+      Tab.View.Invalidate;
+    end;
+    if Prof.DrawerEnabled then
+    begin
+      if Tab.Drawer = nil then
+        SetupTabDrawer(Tab)            { newly enabled }
+      else
+        Tab.Drawer.RefreshLook(ColorProf);
+    end
+    else
+      FreeAndNil(Tab.Drawer);          { newly disabled }
+  end;
+
+  if (ActiveTab <> nil) and (ActiveTab.View <> nil) then
+    UpdateMinSize(ActiveTab.View);     { font may have changed }
+  SyncActive;                          { normalise drawer/view visibility }
+end;
+
+procedure TTermWindow.ViewEdgeHover(Sender: TObject; AEdge: TTermViewEdge);
+var
+  Tab: TTermTab;
+begin
+  Tab := TabForView(Sender);
+  if (Tab = nil) or (Tab.Drawer = nil) then Exit;
+  if AEdge = Tab.Drawer.Gravity then
+    Tab.Drawer.Arm
+  else
+    Tab.Drawer.Disarm;
+end;
+
+procedure TTermWindow.DrawerPersist;
+begin
+  if FConfig <> nil then
+    FConfig.Save(DefaultConfigPath);
+end;
+
+{ Resolve a global keybinding while a drawer's view is focused, so chords like
+  ToggleDrawer / copy work without first clicking back into the main console.
+  Sender is the TTermDrawer; copy/paste target its own view. }
+procedure TTermWindow.DrawerHostKey(Sender: TObject; AKeyCode: Word;
+  AShift: TShiftState; var AHandled: Boolean);
+var
+  Drawer: TTermDrawer;
+  Tab: TTermTab;
+  Bind: TTermKeyBinding;
+  Ctx: TTermActionContext;
+  i: Integer;
+begin
+  if (FConfig = nil) or not (Sender is TTermDrawer) then Exit;
+  Drawer := TTermDrawer(Sender);
+  Bind := FConfig.MatchKey(AKeyCode, AShift);
+  if Bind = nil then Exit;
+
+  Tab := nil;
+  for i := 0 to FTabs.Count - 1 do
+    if TTermTab(FTabs[i]).Drawer = Drawer then begin Tab := TTermTab(FTabs[i]); Break; end;
+
+  Ctx := MakeContext(Tab, -1, '');
+  Ctx.SourceView := Drawer.InnerView;     { copy/paste act on the drawer's terminal }
+
+  if (Bind.Action.Kind = takBuiltin) and (Bind.Action.Builtin = baCopy) then
+  begin
+    if Drawer.InnerView <> nil then
+      AHandled := Drawer.InnerView.CopySelection;
+    Exit;
+  end;
+
+  Bind.Action.Execute(@DoBuiltin, Ctx);
+  AHandled := True;
+end;
+
+{ Clicking into the main console collapses that tab's open drawer, and the
+  click is swallowed so it doesn't also land in the terminal. }
+procedure TTermWindow.ViewClicked(Sender: TObject; var AHandled: Boolean);
+var
+  Tab: TTermTab;
+begin
+  Tab := TabForView(Sender);
+  if (Tab = nil) or (Tab.Drawer = nil) then Exit;
+  if Tab.Drawer.IsOpen then
+  begin
+    Tab.Drawer.CloseDrawer;
+    AHandled := True;
+  end;
+end;
+
 procedure TTermWindow.CoreTitle(Sender: TObject; const ATitle: string);
 var
   Tab: TTermTab;
@@ -732,11 +937,7 @@ begin
     baPaste:   if View <> nil then View.PasteClipboard;
     baNewTab:  AddTab(nil, '', True);
     baCloseTab:
-      if Tab <> nil then
-      begin
-        DisposeTab(Tab, True);
-        if FTabs.Count = 0 then Close else SyncActive;
-      end;
+      QueueDispose(Tab);    { deferred — we're inside this tab's key handler }
     baMoveToWindow:
       begin
         FMenuTab := Tab;
@@ -774,6 +975,16 @@ begin
         if AArg <> '' then FTabBar.SetTitle(Idx, AArg)
         else FTabBar.SetTitle(Idx, string(ACtx.Payload));
       end;
+    baToggleDrawer:
+      if Tab <> nil then
+      begin
+        { Create on demand so enabling the drawer in Settings takes effect on
+          an already-open tab without needing a new tab. }
+        if Tab.Drawer = nil then
+          SetupTabDrawer(Tab);
+        if Tab.Drawer <> nil then
+          Tab.Drawer.Toggle;
+      end;
   end;
 end;
 
@@ -797,6 +1008,7 @@ var
   Idx: Integer;
 begin
   if ATab = nil then Exit;
+  FreeAndNil(ATab.Drawer);              // owns its own view+controller
   Idx := IndexOfTab(ATab);
   Ctrl := ATab.Controller;
   if ATab.View <> nil then

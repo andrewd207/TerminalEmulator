@@ -41,7 +41,9 @@ type
     { alerts }
     baBeep, baFlash, baNotify,
     { appearance }
-    baApplyProfile, baSetTabTitle
+    baApplyProfile, baSetTabTitle,
+    { hover drawer }
+    baToggleDrawer
   );
 
   TTermActionKind = (takBuiltin, takExternal);
@@ -86,7 +88,8 @@ const
     'Copy', 'Paste',
     'NewTab', 'CloseTab', 'MoveToWindow', 'NextTab', 'PrevTab',
     'Beep', 'Flash', 'Notify',
-    'ApplyProfile', 'SetTabTitle'
+    'ApplyProfile', 'SetTabTitle',
+    'ToggleDrawer'
   );
 
 function BuiltinToName(A: TTermBuiltinAction): string;

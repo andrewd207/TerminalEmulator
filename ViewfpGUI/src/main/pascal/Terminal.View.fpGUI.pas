@@ -37,6 +37,19 @@ type
   TTermLinkClickEvent = procedure(Sender: TObject; ALinkId: Integer;
     const AURI: string; var AHandled: Boolean) of object;
 
+  { Which window edge the pointer is currently hugging (within a few pixels).
+    Used to reveal a hover drawer docked to that edge. veNone = no edge / exit. }
+  TTermViewEdge = (veNone, veLeft, veRight, veTop, veBottom);
+
+  { Fired (only when it changes) as the button-less pointer enters/leaves the
+    margin of a window edge, so an embedder can fade in a docked side panel. }
+  TTermEdgeEvent = procedure(Sender: TObject; AEdge: TTermViewEdge) of object;
+
+  { Fired on a left-click into the view.  Set AHandled := True to consume the
+    click entirely (no mouse-report, no selection) — e.g. a click that only
+    dismissed an overlay. }
+  TTermViewClickEvent = procedure(Sender: TObject; var AHandled: Boolean) of object;
+
   { Off-screen canvas that renders straight into a TfpgImage's 32-bit
     ImageData.  The view uses it to bake the cell grid into a privately-owned
     image that the parent window's full-buffer clear cannot touch; each paint
@@ -141,6 +154,21 @@ type
     FMouseDownX: Integer;
     FMouseDownY: Integer;
     FMouseDownAnchor: TTermCellPos;
+    { Half-open client-pixel rectangle the view must leave untouched so an
+      overlay (the hover drawer) drawn on top of it survives the direct blit.
+      Empty when X1>=X2 or Y1>=Y2. }
+    FReservedX1, FReservedY1, FReservedX2, FReservedY2: Integer;
+    FOnEdgeHover: TTermEdgeEvent;
+    FLastEdge: TTermViewEdge;
+    FOnViewClick: TTermViewClickEvent;
+    { When OnKeyAction consumes a KeyPress, swallow the KeyChar fpGUI delivers
+      right after it, so a bound plain key (e.g. drawer relaunch) doesn't also
+      type into the PTY. One-shot: reset at the top of every HandleKeyPress. }
+    FSuppressNextChar: Boolean;
+    function  HasReserved: Boolean; inline;
+    function  RectHitsReserved(AX, AY, AW, AH: Integer): Boolean;
+    procedure FillRectOutsideReserved(AX, AY, AW, AH: Integer; AColor: TfpgColor);
+    function  EdgeAt(AX, AY: Integer): TTermViewEdge;
     function CellSelected(AVirtualRow, ACol: Integer): Boolean;
     procedure ContextMenuItemClick(Sender: TObject);
     procedure ContextPopupShow(Sender: TObject);
@@ -252,6 +280,30 @@ type
       handler suppresses the default. Handlers may e.g. close the parent form. }
     property OnShellExit: TNotifyEvent read FOnShellExit write FOnShellExit;
     procedure WriteExitBanner;
+
+    { Run an arbitrary command line in this view's PTY (via /bin/sh -c) instead
+      of a login shell.  Empty ACmdLine falls back to StartShell. Used by the
+      hover drawer to host a custom app. }
+    procedure StartProgram(const ACmdLine: string);
+    { Reserve a client-pixel band the view will not paint into, so an overlay
+      widget drawn on top of it is not clobbered by the grid blit / overlays.
+      Pass a degenerate rect (or call ClearReservedRect) to release it. }
+    procedure SetReservedRect(AX1, AY1, AX2, AY2: Integer);
+    procedure ClearReservedRect;
+    { Copy an AW x AH region of the baked grid image starting at (AX,AY) into a
+      fresh 32-bit TfpgImage the caller owns.  Lets the drawer grab the pixels
+      behind it (background) or its own rendered content for the fade/assemble
+      animation.  Areas outside the cache come back as the background colour. }
+    function CaptureRegion(AX, AY, AW, AH: Integer): TfpgImage;
+    { Force the off-screen grid cache up to date without a window paint, so
+      CaptureRegion has content even before the view has been shown. }
+    procedure EnsureRendered;
+    { Fired when the button-less pointer enters/leaves a window-edge margin. }
+    property OnEdgeHover: TTermEdgeEvent read FOnEdgeHover write FOnEdgeHover;
+    { Fired on a left-click into this view, so the host can dismiss an overlay
+      (e.g. collapse the hover drawer when the user clicks the main console).
+      Set AHandled to swallow the click. }
+    property OnViewClick: TTermViewClickEvent read FOnViewClick write FOnViewClick;
   end;
 
   TTerminalFPGUIForm = class(TfpgForm)
@@ -261,6 +313,15 @@ type
     procedure AfterCreate; override;
     property TerminalView: TTerminalFPGUIView read FTerminalView;
   end;
+
+{ Copy AImg's top-left AUsedW x AUsedH region straight into ACanvas's window
+  buffer at the current widget origin — a plain memory Move, no AggPas
+  transformImage and no alpha blend (DrawImagePart's slow path).  Must be called
+  between ACanvas.BeginDraw/EndDraw.  Falls back to DrawImagePart if the live
+  canvas isn't the expected THybridCanvas or the hard-cast field layout fails
+  the one-time self-check.  Returns True if the fast path was taken. }
+function BlitImageDirectToCanvas(ACanvas: TfpgCanvasBase; AImg: TfpgImage;
+  AUsedW, AUsedH: Integer): Boolean;
 
 implementation
 
@@ -294,6 +355,12 @@ type
     { Block-copy AImg's top-left AUsedW x AUsedH region into the window buffer
       at this canvas's widget origin.  No blend, no interpolation. }
     procedure BlitImageDirect(AImg: TfpgImage; AUsedW, AUsedH: Integer);
+    { As BlitImageDirect, but leaves the half-open skip rect untouched so an
+      overlay drawn there survives.  The skip rect is always a single edge band
+      (full-width horizontal or full-height vertical), so per row we copy the
+      kept x-range(s) around it. }
+    procedure BlitImageDirectExcept(AImg: TfpgImage; AUsedW, AUsedH: Integer;
+      ASkipX1, ASkipY1, ASkipX2, ASkipY2: Integer);
     { Confirm our overlaid fields actually line up with the real canvas by
       writing a sentinel through FBufData and reading it back via the canvas's
       own Pixels[] accessor.  Guards against a silent layout mismatch. }
@@ -355,11 +422,84 @@ begin
   end;
 end;
 
+procedure THybridCanvasHack.BlitImageDirectExcept(AImg: TfpgImage;
+  AUsedW, AUsedH: Integer; ASkipX1, ASkipY1, ASkipX2, ASkipY2: Integer);
+var
+  y, ox, oy, srcStride, maxW, keepX2: Integer;
+  src, dst: PByte;
+
+  procedure CopySpan(ARow, AColStart, AColCount: Integer);
+  begin
+    if AColCount <= 0 then Exit;
+    if AColStart < 0 then
+    begin
+      Inc(AColCount, AColStart);
+      AColStart := 0;
+    end;
+    if AColStart + AColCount > maxW then
+      AColCount := maxW - AColStart;
+    if AColCount <= 0 then Exit;
+    src := PByte(AImg.ImageData) + ARow * srcStride + AColStart * 4;
+    dst := PByte(FBufData) + (oy + ARow) * FBufStride + (ox + AColStart) * 4;
+    Move(src^, dst^, AColCount * 4);
+  end;
+
+begin
+  if FBufData = nil then Exit;
+  ox := FDeltaX;
+  oy := FDeltaY;
+  maxW := Min(AUsedW, FBufWidth - ox);
+  if maxW <= 0 then Exit;
+  srcStride := AImg.Width * 4;
+  keepX2 := Min(ASkipX2, maxW);
+  for y := 0 to AUsedH - 1 do
+  begin
+    if oy + y >= FBufHeight then Break;
+    if oy + y < 0 then Continue;
+    if (y >= ASkipY1) and (y < ASkipY2) then
+    begin
+      { row crosses the band: copy the kept columns on either side }
+      CopySpan(y, 0, ASkipX1);
+      CopySpan(y, keepX2, maxW - keepX2);
+    end
+    else
+      CopySpan(y, 0, maxW);
+  end;
+end;
+
+{ Tri-state cache for the free BlitImageDirectToCanvas helper: 0 untested,
+  1 direct-copy verified, 2 fall back.  The hard-cast field layout is fixed at
+  compile time, so one verification holds for every THybridCanvas instance. }
+var
+  GDirectBlitState: Integer = 0;
+
+function BlitImageDirectToCanvas(ACanvas: TfpgCanvasBase; AImg: TfpgImage;
+  AUsedW, AUsedH: Integer): Boolean;
+begin
+  Result := False;
+  if (ACanvas = nil) or (AImg = nil) then Exit;
+  if (GDirectBlitState = 0) and (ACanvas.ClassName = 'THybridCanvas') then
+  begin
+    if THybridCanvasHack(Pointer(ACanvas)).LayoutMatches then
+      GDirectBlitState := 1
+    else
+      GDirectBlitState := 2;
+  end;
+  if (GDirectBlitState = 1) and (ACanvas.ClassName = 'THybridCanvas') then
+  begin
+    THybridCanvasHack(Pointer(ACanvas)).BlitImageDirect(AImg, AUsedW, AUsedH);
+    Result := True;
+  end
+  else
+    ACanvas.DrawImagePart(0, 0, AImg, 0, 0, AUsedW, AUsedH);
+end;
+
 
 const
   CURSOR_BLINK_MS = 750;
   PUMP_MS = 20;
   SELECTION_DRAG_THRESHOLD = 3; { pixels before mouse-down -> selection }
+  EDGE_HOVER_PX = 6;            { pointer proximity that arms a docked drawer }
 
   { Floor on the PTY geometry. Below ~2 rows or a couple dozen columns a
     line-editor's SIGWINCH redraw (bash readline only erases the current
@@ -647,6 +787,135 @@ begin
       was -1; this is the first one that reaches the kernel. }
     SyncSizeToController;
   end;
+end;
+
+procedure TTerminalFPGUIView.StartProgram(const ACmdLine: string);
+begin
+  if FController = nil then Exit;
+  if Trim(ACmdLine) = '' then
+  begin
+    StartShell;
+    Exit;
+  end;
+  SyncSizeToController;
+  { Run through the shell so the user can write a full command line (args,
+    pipes, env) and still get a PTY-backed child. }
+  FController.StartCommand('/bin/sh', ['-c', ACmdLine]);
+  SyncSizeToController;
+end;
+
+function TTerminalFPGUIView.HasReserved: Boolean;
+begin
+  Result := (FReservedX2 > FReservedX1) and (FReservedY2 > FReservedY1);
+end;
+
+procedure TTerminalFPGUIView.SetReservedRect(AX1, AY1, AX2, AY2: Integer);
+begin
+  if (AX1 = FReservedX1) and (AY1 = FReservedY1)
+     and (AX2 = FReservedX2) and (AY2 = FReservedY2) then
+    Exit;
+  FReservedX1 := AX1; FReservedY1 := AY1;
+  FReservedX2 := AX2; FReservedY2 := AY2;
+  Repaint;
+end;
+
+procedure TTerminalFPGUIView.ClearReservedRect;
+begin
+  SetReservedRect(0, 0, 0, 0);
+end;
+
+function TTerminalFPGUIView.RectHitsReserved(AX, AY, AW, AH: Integer): Boolean;
+begin
+  Result := HasReserved
+    and (AX < FReservedX2) and (AX + AW > FReservedX1)
+    and (AY < FReservedY2) and (AY + AH > FReservedY1);
+end;
+
+{ Fill the requested rect with AColor, but carve out the reserved band (up to
+  four surrounding sub-rects).  Used for the sub-cell bottom remainder so it
+  never repaints under the drawer. }
+procedure TTerminalFPGUIView.FillRectOutsideReserved(AX, AY, AW, AH: Integer;
+  AColor: TfpgColor);
+var
+  rx1, ry1, rx2, ry2: Integer;
+begin
+  Canvas.Color := AColor;
+  if not RectHitsReserved(AX, AY, AW, AH) then
+  begin
+    Canvas.FillRectangle(AX, AY, AW, AH);
+    Exit;
+  end;
+  rx1 := Max(AX, FReservedX1); ry1 := Max(AY, FReservedY1);
+  rx2 := Min(AX + AW, FReservedX2); ry2 := Min(AY + AH, FReservedY2);
+  if AY < ry1 then               { strip above the hole }
+    Canvas.FillRectangle(AX, AY, AW, ry1 - AY);
+  if AY + AH > ry2 then          { strip below the hole }
+    Canvas.FillRectangle(AX, ry2, AW, AY + AH - ry2);
+  if AX < rx1 then               { strip left of the hole }
+    Canvas.FillRectangle(AX, ry1, rx1 - AX, ry2 - ry1);
+  if AX + AW > rx2 then          { strip right of the hole }
+    Canvas.FillRectangle(rx2, ry1, AX + AW - rx2, ry2 - ry1);
+end;
+
+function TTerminalFPGUIView.EdgeAt(AX, AY: Integer): TTermViewEdge;
+var
+  W, H: Integer;
+begin
+  Result := veNone;
+  W := ClientWidth;
+  H := ActualHeight;
+  if (AX < 0) or (AY < 0) or (AX >= W) or (AY >= H) then Exit;
+  if AX <= EDGE_HOVER_PX then Result := veLeft
+  else if AX >= W - 1 - EDGE_HOVER_PX then Result := veRight
+  else if AY <= EDGE_HOVER_PX then Result := veTop
+  else if AY >= H - 1 - EDGE_HOVER_PX then Result := veBottom;
+end;
+
+function TTerminalFPGUIView.CaptureRegion(AX, AY, AW, AH: Integer): TfpgImage;
+var
+  Img: TfpgImage;
+  y, copyW, srcStride, dstStride: Integer;
+  src, dst: PByte;
+  px: PLongWord;
+  i: Integer;
+begin
+  if AW < 1 then AW := 1;
+  if AH < 1 then AH := 1;
+  Img := TfpgImage.Create;
+  Img.AllocateImage(32, AW, AH);
+  dstStride := AW * 4;
+  { Pre-fill with the background colour so out-of-cache pixels are sane. }
+  for y := 0 to AH - 1 do
+  begin
+    px := PLongWord(PByte(Img.ImageData) + y * dstStride);
+    for i := 0 to AW - 1 do
+    begin
+      px^ := ColorToOpaqueBGRA(FBackgroundColor);
+      Inc(px);
+    end;
+  end;
+  if (FGridImage <> nil) and FGridValid then
+  begin
+    srcStride := FGridImage.Width * 4;
+    for y := 0 to AH - 1 do
+    begin
+      if (AY + y < 0) or (AY + y >= FGridH) then Continue;
+      copyW := Min(AW, FGridW - AX);
+      if (AX < 0) or (copyW <= 0) then Continue;
+      src := PByte(FGridImage.ImageData) + (AY + y) * srcStride + AX * 4;
+      dst := PByte(Img.ImageData) + y * dstStride;
+      Move(src^, dst^, copyW * 4);
+    end;
+  end;
+  Img.UpdateImage;
+  Result := Img;
+end;
+
+procedure TTerminalFPGUIView.EnsureRendered;
+begin
+  if FController = nil then Exit;
+  UpdateMetrics;
+  UpdateGridCache;
 end;
 
 procedure TTerminalFPGUIView.ScrollBy(ADeltaRows: Integer);
@@ -1457,10 +1726,8 @@ begin
       { Bottom remainder (client height not an exact multiple of a cell) is not
         covered by the grid image; paint it in the background colour. }
       if FGridH < ActualHeight then
-      begin
-        Canvas.Color := FBackgroundColor;
-        Canvas.FillRectangle(0, FGridH, ClientWidth, ActualHeight - FGridH);
-      end;
+        FillRectOutsideReserved(0, FGridH, ClientWidth, ActualHeight - FGridH,
+          FBackgroundColor);
 
       PaintCursorOverlay;
       PaintHoverOverlay;
@@ -1683,7 +1950,13 @@ begin
   end;
 
   if FFastBlit = 1 then
-    THybridCanvasHack(Pointer(Canvas)).BlitImageDirect(FGridImage, FGridW, FGridH)
+  begin
+    if HasReserved then
+      THybridCanvasHack(Pointer(Canvas)).BlitImageDirectExcept(FGridImage,
+        FGridW, FGridH, FReservedX1, FReservedY1, FReservedX2, FReservedY2)
+    else
+      THybridCanvasHack(Pointer(Canvas)).BlitImageDirect(FGridImage, FGridW, FGridH);
+  end
   else
     Canvas.DrawImagePart(0, 0, FGridImage, 0, 0, FGridW, FGridH);
 end;
@@ -1701,6 +1974,10 @@ begin
   CursorVirtualRow := FController.Core.HistoryCount + FController.Core.Cursor.Row;
   CursorViewRow := CursorVirtualRow - FTopRow;
   if (CursorViewRow < 0) or (CursorViewRow >= RowsVisible) then
+    Exit;
+  { Don't draw the main cursor under the drawer overlay. }
+  if RectHitsReserved(FController.Core.Cursor.Col * FCharWidth,
+       CursorViewRow * FCharHeight, FCharWidth, FCharHeight) then
     Exit;
 
   case FCursorStyle of
@@ -1748,6 +2025,9 @@ begin
       while (Col <= MaxCol) and (Line[Col].LinkId = FHoverLinkId) do
         Inc(Col);
       RunRight := Col * FCharWidth - 1;
+      if RectHitsReserved(RunStart * FCharWidth, Row * FCharHeight,
+           RunRight + 1 - RunStart * FCharWidth, FCharHeight) then
+        Continue;
       Canvas.Color := MapColor(Line[RunStart].FG, False);
       Canvas.DrawLine(RunStart * FCharWidth, Y, RunRight + 1, Y);
     end;
@@ -1821,6 +2101,7 @@ begin
   inherited HandleKeyPress(keycode, shiftstate, consumed);
   if FController = nil then
     Exit;
+  FSuppressNextChar := False;
 
   { App keybindings get first refusal. If the app consumes the chord (e.g. ran
     a bound action), we stop; otherwise fall through to the built-in defaults. }
@@ -1831,6 +2112,7 @@ begin
     if LHandled then
     begin
       consumed := True;
+      FSuppressNextChar := True;   { eat the char fpGUI emits for this key }
       Exit;
     end;
   end;
@@ -1945,6 +2227,14 @@ procedure TTerminalFPGUIView.HandleKeyChar(var AText: TfpgChar;
   var shiftstate: TShiftState; var consumed: boolean);
 begin
   if FController = nil then Exit;
+  { A key just consumed by OnKeyAction (e.g. drawer relaunch) must not also be
+    typed into the PTY. }
+  if FSuppressNextChar then
+  begin
+    FSuppressNextChar := False;
+    consumed := True;
+    Exit;
+  end;
   if AText = '' then Exit;
   { Drop control-code byte 0..31 — those are handled in HandleKeyPress so
     Ctrl+letter combinations don't double-fire. }
@@ -1995,12 +2285,21 @@ procedure TTerminalFPGUIView.HandleLMouseDown(x, y: integer;
   shiftstate: TShiftState);
 var
   HadSelection: Boolean;
+  ClickHandled: Boolean;
 begin
   { Close any open context menu first. fpGUI on Windows doesn't always
     dismiss popups on a click into the owning widget. }
   if (FContextMenu <> nil) and (FContextMenu.Window <> nil)
      and FContextMenu.Window.HasHandle then
     FContextMenu.Close;
+  { Let the host claim the click (e.g. dismiss an overlay).  When it does we
+    swallow the click entirely — no mouse-report, no selection start. }
+  if Assigned(FOnViewClick) then
+  begin
+    ClickHandled := False;
+    FOnViewClick(Self, ClickHandled);
+    if ClickHandled then Exit;
+  end;
   if TryMouseReport(x, y, shiftstate, tmbLeft, True, False) then Exit;
   { Clear any prior selection on a fresh click. We don't activate a new
     selection here -- that waits until the mouse has actually moved past
@@ -2025,6 +2324,7 @@ var
   Cell: TTermCellPos;
   Btn: TTermMouseButton;
   HasButton: Boolean;
+  NewEdge: TTermViewEdge;
 begin
   inherited HandleMouseMove(x, y, btnstate, shiftstate);
 
@@ -2035,7 +2335,19 @@ begin
     tracking enabled.  It does not consume the event, so motion is still reported
     to the app in the block below. }
   if (btnstate and (MOUSE_LEFT or MOUSE_MIDDLE or MOUSE_RIGHT)) = 0 then
+  begin
     SetHoverLink(LinkIdAt(x, y));
+    { Arm/disarm a docked hover drawer as the pointer hugs a window edge. }
+    if Assigned(FOnEdgeHover) then
+    begin
+      NewEdge := EdgeAt(x, y);
+      if NewEdge <> FLastEdge then
+      begin
+        FLastEdge := NewEdge;
+        FOnEdgeHover(Self, NewEdge);
+      end;
+    end;
+  end;
 
   if (FController <> nil) and (FController.Core.MouseProtocol <> tmpNone)
      and not (ssShift in shiftstate) then
@@ -2091,6 +2403,11 @@ begin
   { Pointer left the widget — drop any hover so the solid line reverts to dotted
     and we don't leave a stale hand cursor. }
   SetHoverLink(0);
+  if (FLastEdge <> veNone) and Assigned(FOnEdgeHover) then
+  begin
+    FLastEdge := veNone;
+    FOnEdgeHover(Self, veNone);
+  end;
 end;
 
 procedure TTerminalFPGUIView.HandleLMouseUp(x, y: integer;

@@ -28,12 +28,28 @@ uses
   TermFpGUI.Actions, Terminal.View.fpGUI;
 
 type
+  { How the hover drawer reveals itself. }
+  TTermDrawerAnim = (tdaFade, tdaAssemble, tdaNone);
+  { When the drawer's program is launched. }
+  TTermDrawerLaunch = (tdlOnShow, tdlOnStart);
+
   TTermProfile = class
   public
     Name: string;
     FontDesc: string;
     FGColor: TfpgColor;
     BGColor: TfpgColor;
+    { Hover-drawer overlay defined by this profile (one per profile). The edge
+      it docks to is TTermViewEdge (veLeft/veRight/veTop/veBottom; veNone when
+      disabled-by-gravity is irrelevant — DrawerEnabled gates it). }
+    DrawerEnabled: Boolean;
+    DrawerName: string;            // label shown on the handle / tab
+    DrawerCommand: string;         // '' = default login shell
+    DrawerGravity: TTermViewEdge;  // which edge it hides on
+    DrawerSizeFrac: Double;        // 0.1..0.9 of content width/height
+    DrawerAnim: TTermDrawerAnim;
+    DrawerLaunch: TTermDrawerLaunch;
+    DrawerColorProfile: string;    // profile whose fg/bg the drawer uses; '' = own
     constructor Create(const AName, AFont: string; AFG, ABG: TfpgColor);
     procedure ApplyTo(AView: TTerminalFPGUIView);
   end;
@@ -164,6 +180,28 @@ begin
   Result := TfpgColor(StrToIntDef('$' + Trim(S), 0));
 end;
 
+{ ---- drawer enum <-> ini string ---- }
+
+function EdgeToStr(E: TTermViewEdge): string;
+begin
+  case E of
+    veLeft:   Result := 'left';
+    veRight:  Result := 'right';
+    veTop:    Result := 'top';
+    veBottom: Result := 'bottom';
+  else        Result := 'none';
+  end;
+end;
+
+function StrToEdge(const S: string): TTermViewEdge;
+begin
+  if SameText(S, 'left') then Result := veLeft
+  else if SameText(S, 'top') then Result := veTop
+  else if SameText(S, 'bottom') then Result := veBottom
+  else if SameText(S, 'none') then Result := veNone
+  else Result := veRight;
+end;
+
 { ---- action (de)serialisation under a key prefix within a section ---- }
 
 procedure WriteAction(Ini: TIniFile; const Sec, Pfx: string; A: TTermAction);
@@ -200,6 +238,15 @@ begin
   FontDesc := AFont;
   FGColor := AFG;
   BGColor := ABG;
+  { Drawer defaults: disabled, a shell on the right, fade in, lazy launch. }
+  DrawerEnabled := False;
+  DrawerName := 'Drawer';
+  DrawerCommand := '';
+  DrawerGravity := veRight;
+  DrawerSizeFrac := 0.33;
+  DrawerAnim := tdaFade;
+  DrawerLaunch := tdlOnShow;
+  DrawerColorProfile := '';
 end;
 
 procedure TTermProfile.ApplyTo(AView: TTerminalFPGUIView);
@@ -342,6 +389,11 @@ function TTermConfig.MatchKey(AKeyCode: Word; AShift: TShiftState): TTermKeyBind
 var
   i: Integer;
 begin
+  { Only Ctrl/Shift/Alt/Meta are meaningful for a chord; strip lock-key and
+    mouse-button bits (ssNum/ssCaps/ssScroll/…) the backend folds into the
+    shift-state, or an exact set compare misses every binding when e.g. NumLock
+    is on.  The stored side already keeps only these four (see ShiftToStr). }
+  AShift := AShift * [ssCtrl, ssShift, ssAlt, ssMeta];
   for i := 0 to FKeys.Count - 1 do
     if (GetKey(i).KeyCode = AKeyCode) and (GetKey(i).Shift = AShift) then
       Exit(GetKey(i));
@@ -394,6 +446,8 @@ begin
   AddKey(Ord('N'), [ssCtrl, ssShift], TTermAction.CreateBuiltin(baMoveToWindow));
   AddKey(keyPageDown, [ssCtrl],       TTermAction.CreateBuiltin(baNextTab));
   AddKey(keyPageUp,   [ssCtrl],       TTermAction.CreateBuiltin(baPrevTab));
+  { Hover drawer toggle (quake-style). Profile must have a drawer enabled. }
+  AddKey(Ord('D'), [ssCtrl, ssShift], TTermAction.CreateBuiltin(baToggleDrawer));
 
   { ---- Signal bindings (examples; user edits in Settings) ---- }
   { OSC 9 ; <text>  -> built-in desktop notification (iTerm2 convention). }
@@ -437,6 +491,19 @@ begin
           Ini.ReadString(s, 'font', 'Monospace-11'),
           HexToColor(Ini.ReadString(s, 'fg', 'FFFFFF')),
           HexToColor(Ini.ReadString(s, 'bg', '000000')));
+        P.DrawerEnabled := Ini.ReadBool(s, 'drawer_enabled', False);
+        P.DrawerName    := Ini.ReadString(s, 'drawer_name', 'Drawer');
+        P.DrawerCommand := Ini.ReadString(s, 'drawer_command', '');
+        P.DrawerGravity := StrToEdge(Ini.ReadString(s, 'drawer_gravity', 'right'));
+        P.DrawerSizeFrac := Ini.ReadFloat(s, 'drawer_size', 0.33);
+        case Ini.ReadString(s, 'drawer_anim', 'fade') of
+          'assemble': P.DrawerAnim := tdaAssemble;
+          'none':     P.DrawerAnim := tdaNone;
+        else          P.DrawerAnim := tdaFade;
+        end;
+        if Ini.ReadString(s, 'drawer_launch', 'onshow') = 'onstart' then
+          P.DrawerLaunch := tdlOnStart else P.DrawerLaunch := tdlOnShow;
+        P.DrawerColorProfile := Ini.ReadString(s, 'drawer_colors', '');
         AddProfile(P);
       end
       else if AnsiStartsText('Key.', s) then
@@ -503,6 +570,20 @@ begin
       Ini.WriteString(Sec, 'font', GetProfile(i).FontDesc);
       Ini.WriteString(Sec, 'fg', ColorToHex(GetProfile(i).FGColor));
       Ini.WriteString(Sec, 'bg', ColorToHex(GetProfile(i).BGColor));
+      Ini.WriteBool  (Sec, 'drawer_enabled', GetProfile(i).DrawerEnabled);
+      Ini.WriteString(Sec, 'drawer_name',    GetProfile(i).DrawerName);
+      Ini.WriteString(Sec, 'drawer_command', GetProfile(i).DrawerCommand);
+      Ini.WriteString(Sec, 'drawer_gravity', EdgeToStr(GetProfile(i).DrawerGravity));
+      Ini.WriteFloat (Sec, 'drawer_size',    GetProfile(i).DrawerSizeFrac);
+      case GetProfile(i).DrawerAnim of
+        tdaAssemble: Ini.WriteString(Sec, 'drawer_anim', 'assemble');
+        tdaNone:     Ini.WriteString(Sec, 'drawer_anim', 'none');
+      else           Ini.WriteString(Sec, 'drawer_anim', 'fade');
+      end;
+      if GetProfile(i).DrawerLaunch = tdlOnStart then
+        Ini.WriteString(Sec, 'drawer_launch', 'onstart')
+      else Ini.WriteString(Sec, 'drawer_launch', 'onshow');
+      Ini.WriteString(Sec, 'drawer_colors', GetProfile(i).DrawerColorProfile);
     end;
     for i := 0 to FKeys.Count - 1 do
     begin

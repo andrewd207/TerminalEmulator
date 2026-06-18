@@ -23,6 +23,8 @@ interface
 uses
   Classes, SysUtils, fpg_base, fpg_main, fpg_form, fpg_tab, fpg_grid,
   fpg_button, fpg_dialogs, fpg_label, fpg_edit, fpg_combobox, fpg_panel,
+  fpg_checkbox,
+  Terminal.View.fpGUI,                 { TTermViewEdge }
   TermFpGUI.Config, TermFpGUI.Actions;
 
 type
@@ -94,6 +96,15 @@ type
     FFgSwatch, FBgSwatch: TfpgBevel;
     FFontDesc: string;
     FFg, FBg: TfpgColor;
+    { drawer section }
+    FDrawerEnabled: TfpgCheckBox;
+    FDrawerName: TfpgEdit;
+    FDrawerCmd: TfpgEdit;
+    FDrawerSize: TfpgEdit;
+    FDrawerGravity: TfpgComboBox;
+    FDrawerAnim: TfpgComboBox;
+    FDrawerLaunch: TfpgComboBox;
+    FDrawerColors: TfpgComboBox;
     procedure SyncSwatches;
     procedure ChooseFontClick(Sender: TObject);
     procedure ChooseFgClick(Sender: TObject);
@@ -102,6 +113,9 @@ type
     procedure CancelClick(Sender: TObject);
   public
     constructor Create(AOwner: TComponent); override;
+    { Populate the drawer colour-source list ('(this profile)' + every profile
+      name) so the drawer can borrow another profile's colours. }
+    procedure SetAvailableProfiles(AConfig: TTermConfig; const ASelfName: string);
     procedure LoadFrom(P: TTermProfile);
     procedure StoreTo(P: TTermProfile);
     function  ProfileName: string;
@@ -236,7 +250,7 @@ begin
   inherited Create(AOwner);
   WindowTitle := 'Edit Profile';
   WindowPosition := wpScreenCenter;
-  SetPosition(0, 0, 380, 226);
+  SetPosition(0, 0, 420, 446);
   Sizeable := False;
   FFontDesc := 'Monospace-11';
   FFg := clWhite;
@@ -275,13 +289,83 @@ begin
   FBgSwatch.SetPosition(216, 116, 60, 26);
   FBgSwatch.Shape := bsBox;
 
+  { ---- Hover drawer (overlay panel defined by this profile) ---- }
+  Lbl := TfpgLabel.Create(Self);
+  Lbl.SetPosition(12, 152, 396, 18);
+  Lbl.Text := '— Hover drawer (slide-out side panel) —';
+
+  FDrawerEnabled := TfpgCheckBox.Create(Self);
+  FDrawerEnabled.SetPosition(12, 174, 200, 22);
+  FDrawerEnabled.Text := 'Enable drawer';
+
+  Lbl := TfpgLabel.Create(Self);
+  Lbl.SetPosition(12, 204, 70, 24);
+  Lbl.Text := 'Name:';
+  FDrawerName := TfpgEdit.Create(Self);
+  FDrawerName.SetPosition(86, 202, 150, 24);
+  Lbl := TfpgLabel.Create(Self);
+  Lbl.SetPosition(248, 204, 40, 24);
+  Lbl.Text := 'Size:';
+  FDrawerSize := TfpgEdit.Create(Self);
+  FDrawerSize.SetPosition(290, 202, 60, 24);
+
+  Lbl := TfpgLabel.Create(Self);
+  Lbl.SetPosition(12, 236, 70, 24);
+  Lbl.Text := 'Command:';
+  FDrawerCmd := TfpgEdit.Create(Self);
+  FDrawerCmd.SetPosition(86, 234, 322, 24);
+
+  Lbl := TfpgLabel.Create(Self);
+  Lbl.SetPosition(12, 264, 16, 18);
+  Lbl.Text := '';
+  Lbl := TfpgLabel.Create(Self);
+  Lbl.SetPosition(86, 260, 322, 16);
+  Lbl.Text := '(empty = default login shell; e.g. htop, ranger, btop)';
+
+  Lbl := TfpgLabel.Create(Self);
+  Lbl.SetPosition(12, 290, 70, 24);
+  Lbl.Text := 'Gravity:';
+  FDrawerGravity := TfpgComboBox.Create(Self);
+  FDrawerGravity.SetPosition(86, 288, 120, 24);
+  FDrawerGravity.Items.Add('Left');
+  FDrawerGravity.Items.Add('Right');
+  FDrawerGravity.Items.Add('Top');
+  FDrawerGravity.Items.Add('Bottom');
+  FDrawerGravity.FocusItem := 1;
+  Lbl := TfpgLabel.Create(Self);
+  Lbl.SetPosition(216, 290, 44, 24);
+  Lbl.Text := 'Anim:';
+  FDrawerAnim := TfpgComboBox.Create(Self);
+  FDrawerAnim.SetPosition(262, 288, 146, 24);
+  FDrawerAnim.Items.Add('Fade');
+  FDrawerAnim.Items.Add('Assemble');
+  FDrawerAnim.Items.Add('None');
+  FDrawerAnim.FocusItem := 0;
+
+  Lbl := TfpgLabel.Create(Self);
+  Lbl.SetPosition(12, 322, 70, 24);
+  Lbl.Text := 'Launch:';
+  FDrawerLaunch := TfpgComboBox.Create(Self);
+  FDrawerLaunch.SetPosition(86, 320, 200, 24);
+  FDrawerLaunch.Items.Add('On first show');
+  FDrawerLaunch.Items.Add('On profile start');
+  FDrawerLaunch.FocusItem := 0;
+
+  Lbl := TfpgLabel.Create(Self);
+  Lbl.SetPosition(12, 354, 70, 24);
+  Lbl.Text := 'Colors:';
+  FDrawerColors := TfpgComboBox.Create(Self);
+  FDrawerColors.SetPosition(86, 352, 200, 24);
+  FDrawerColors.Items.Add('(this profile)');
+  FDrawerColors.FocusItem := 0;
+
   Btn := TfpgButton.Create(Self);
   Btn.Text := 'Cancel';
-  Btn.SetPosition(196, 190, 80, 26);
+  Btn.SetPosition(236, 410, 80, 26);
   Btn.OnClick := @CancelClick;
   Btn := TfpgButton.Create(Self);
   Btn.Text := 'OK';
-  Btn.SetPosition(284, 190, 84, 26);
+  Btn.SetPosition(324, 410, 84, 26);
   Btn.OnClick := @OkClick;
 end;
 
@@ -294,21 +378,99 @@ begin
   FFontEdit.Text := FFontDesc;
 end;
 
+function EdgeToIndex(E: TTermViewEdge): Integer;
+begin
+  case E of
+    veLeft:   Result := 0;
+    veRight:  Result := 1;
+    veTop:    Result := 2;
+    veBottom: Result := 3;
+  else        Result := 1;
+  end;
+end;
+
+function IndexToEdge(I: Integer): TTermViewEdge;
+begin
+  case I of
+    0: Result := veLeft;
+    2: Result := veTop;
+    3: Result := veBottom;
+  else Result := veRight;
+  end;
+end;
+
+procedure TProfileEditForm.SetAvailableProfiles(AConfig: TTermConfig;
+  const ASelfName: string);
+var
+  i: Integer;
+begin
+  FDrawerColors.Items.Clear;
+  FDrawerColors.Items.Add('(this profile)');
+  if AConfig <> nil then
+    for i := 0 to AConfig.ProfileCount - 1 do
+      FDrawerColors.Items.Add(AConfig.Profiles[i].Name);
+  FDrawerColors.FocusItem := 0;
+end;
+
 procedure TProfileEditForm.LoadFrom(P: TTermProfile);
+var
+  idx: Integer;
 begin
   FNameEdit.Text := P.Name;
   FFontDesc := P.FontDesc;
   FFg := P.FGColor;
   FBg := P.BGColor;
   SyncSwatches;
+  FDrawerEnabled.Checked := P.DrawerEnabled;
+  FDrawerName.Text := P.DrawerName;
+  FDrawerCmd.Text := P.DrawerCommand;
+  FDrawerSize.Text := FormatFloat('0.00', P.DrawerSizeFrac);
+  FDrawerGravity.FocusItem := EdgeToIndex(P.DrawerGravity);
+  case P.DrawerAnim of
+    tdaAssemble: FDrawerAnim.FocusItem := 1;
+    tdaNone:     FDrawerAnim.FocusItem := 2;
+  else           FDrawerAnim.FocusItem := 0;
+  end;
+  if P.DrawerLaunch = tdlOnStart then FDrawerLaunch.FocusItem := 1
+  else FDrawerLaunch.FocusItem := 0;
+  if P.DrawerColorProfile = '' then
+    FDrawerColors.FocusItem := 0
+  else
+  begin
+    idx := FDrawerColors.Items.IndexOf(P.DrawerColorProfile);
+    if idx >= 0 then FDrawerColors.FocusItem := idx
+    else FDrawerColors.FocusItem := 0;
+  end;
 end;
 
 procedure TProfileEditForm.StoreTo(P: TTermProfile);
+var
+  f: Double;
 begin
   P.Name := Trim(FNameEdit.Text);
   P.FontDesc := FFontDesc;
   P.FGColor := FFg;
   P.BGColor := FBg;
+  P.DrawerEnabled := FDrawerEnabled.Checked;
+  P.DrawerName := Trim(FDrawerName.Text);
+  if P.DrawerName = '' then P.DrawerName := 'Drawer';
+  P.DrawerCommand := Trim(FDrawerCmd.Text);
+  f := StrToFloatDef(StringReplace(Trim(FDrawerSize.Text), ',', '.', []), 0.33);
+  if f < 0.1 then f := 0.1;
+  if f > 0.9 then f := 0.9;
+  P.DrawerSizeFrac := f;
+  P.DrawerGravity := IndexToEdge(FDrawerGravity.FocusItem);
+  case FDrawerAnim.FocusItem of
+    1: P.DrawerAnim := tdaAssemble;
+    2: P.DrawerAnim := tdaNone;
+  else P.DrawerAnim := tdaFade;
+  end;
+  if FDrawerLaunch.FocusItem = 1 then P.DrawerLaunch := tdlOnStart
+  else P.DrawerLaunch := tdlOnShow;
+  if FDrawerColors.FocusItem <= 0 then
+    P.DrawerColorProfile := ''
+  else
+    P.DrawerColorProfile := FDrawerColors.Text;
 end;
 
 function TProfileEditForm.ProfileName: string;
@@ -616,6 +778,7 @@ begin
   Frm := TProfileEditForm.Create(nil);
   Seed := TTermProfile.Create('New Profile', 'Monospace-11', clWhite, TfpgColor($000000));
   try
+    Frm.SetAvailableProfiles(FConfig, '');
     Frm.LoadFrom(Seed);
     if Frm.ShowModal = mrOK then
     begin
@@ -641,6 +804,7 @@ begin
   OldName := P.Name;
   Frm := TProfileEditForm.Create(nil);
   try
+    Frm.SetAvailableProfiles(FConfig, P.Name);
     Frm.LoadFrom(P);
     if Frm.ShowModal = mrOK then
     begin
