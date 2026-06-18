@@ -17,6 +17,7 @@ program TermFpGUI;
 {$mode objfpc}{$H+}
 
 uses
+  SysUtils,
   fpg_main, fpg_stylemanager,
   { Pulling these units in registers their styles with fpgStyleManager so the
     user can pick them from the hamburger menu. }
@@ -25,14 +26,111 @@ uses
   TermFpGUI.Config,
   TermFpGUI.Window;
 
+{ 1-based index of the first bare "--" separator, or 0 if there is none.
+  Everything after it is the program to run, not our own options. }
+function DashDashIndex: Integer;
+var
+  i: Integer;
+begin
+  Result := 0;
+  for i := 1 to ParamCount do
+    if ParamStr(i) = '--' then Exit(i);
+end;
+
+{ Scan argv[1..AMax] for --app <file> / --app=<file> / -a <file>.  '' if absent. }
+function AppConfigArg(AMax: Integer): string;
+var
+  i: Integer;
+  s: string;
+begin
+  Result := '';
+  i := 1;
+  while i <= AMax do
+  begin
+    s := ParamStr(i);
+    if (s = '--app') or (s = '-a') then
+    begin
+      if i < AMax then Result := ParamStr(i + 1);
+      Exit;
+    end
+    else if Copy(s, 1, 6) = '--app=' then
+    begin
+      Result := Copy(s, 7, MaxInt);
+      Exit;
+    end;
+    Inc(i);
+  end;
+end;
+
+{ Single-quote an argument for /bin/sh, so spaces and metacharacters survive
+  StartProgram's "sh -c <line>" without the shell re-splitting them. }
+function ShQuote(const S: string): string;
+begin
+  Result := '''' + StringReplace(S, '''', '''\''''', [rfReplaceAll]) + '''';
+end;
+
+{ Join argv[AFrom..ParamCount] into one shell-safe command line. }
+function JoinArgs(AFrom: Integer): string;
+var
+  i: Integer;
+begin
+  Result := '';
+  for i := AFrom to ParamCount do
+  begin
+    if Result <> '' then Result := Result + ' ';
+    Result := Result + ShQuote(ParamStr(i));
+  end;
+end;
+
 procedure MainProc;
 var
   Win: TTermWindow;
   Cfg: TTermConfig;
+  App: TTermAppConfig;
+  AppPath, MainCmd, WinTitle, RunCmd: string;
+  DD, OptMax: Integer;
 begin
   fpgApplication.Initialize;
   Cfg := TTermConfig.Create;
   Cfg.Load(DefaultConfigPath);              // seeds defaults if no file yet
+
+  { Everything after a bare "--" is the program to run; our own options are only
+    parsed before it. }
+  DD := DashDashIndex;
+  if DD > 0 then OptMax := DD - 1 else OptMax := ParamCount;
+  RunCmd := '';
+  if DD > 0 then RunCmd := JoinArgs(DD + 1);
+
+  { App mode: load the launch config, fold its profile in as the active profile
+    (so all the normal profile/drawer wiring applies), and remember the main
+    command + title to launch. }
+  App := nil;
+  MainCmd := '';
+  WinTitle := '';
+  AppPath := AppConfigArg(OptMax);
+  if AppPath <> '' then
+  begin
+    App := TTermAppConfig.Create;
+    if App.Load(AppPath) then
+    begin
+      MainCmd := App.Command;
+      WinTitle := App.Title;
+      if App.Theme <> '' then Cfg.Theme := App.Theme;
+      Cfg.AddProfile(App.TakeProfile);      // Cfg now owns the profile
+      Cfg.ActiveProfile := 'App';
+    end
+    else
+    begin
+      writeln('termfpgui: cannot read app config: ', AppPath);
+      FreeAndNil(App);
+    end;
+  end;
+
+  { A trailing "-- prog args" overrides the command to run (app config or not),
+    but does not by itself hide the tab strip — that is app mode (--app) only. }
+  if RunCmd <> '' then
+    MainCmd := RunCmd;
+
   if Cfg.Theme <> '' then
   begin
     fpgStyleManager.SetStyle(Cfg.Theme);
@@ -42,10 +140,17 @@ begin
   Win := TTermWindow.Create(nil);
   try
     Win.Config := Cfg;                       // shared across torn-off windows
-    Win.AddTab(nil, '', {AStartShell=}True); // first tab; shell starts on show
+    if App <> nil then
+    begin
+      Win.EnterAppMode;                      // hide the tab strip
+      if WinTitle <> '' then Win.WindowTitle := WinTitle;
+    end;
+    { First tab; the program (app command or login shell) starts on show. }
+    Win.AddTab(nil, WinTitle, {AStartShell=}True, MainCmd);
     Win.Show;
     fpgApplication.Run;
   finally
+    App.Free;
     { Win may already have been freed during the run (e.g. its window closed
       while another stayed open), so free whatever windows remain, not Win. }
     TTermWindow.FreeAll;

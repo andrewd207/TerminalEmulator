@@ -138,6 +138,28 @@ type
     property LinkOpenCommand: string read FLinkOpenCommand write FLinkOpenCommand;
   end;
 
+  { An "app mode" launch config (loaded via --app <file>): runs a single program
+    in the main terminal, optionally with a configured drawer, and the host hides
+    the tab strip.  The appearance + drawer live in Profile (it reuses the very
+    same INI keys a normal profile uses), so anything a profile can express the
+    app config can too. }
+  TTermAppConfig = class
+  private
+    FProfile: TTermProfile;
+  public
+    Title: string;        // window title ('' = leave default)
+    Command: string;      // main program for the terminal ('' = login shell)
+    Theme: string;        // fpGUI style override ('' = leave config's theme)
+    constructor Create;
+    destructor Destroy; override;
+    { Read the [App] section.  Returns False if the file is missing. }
+    function Load(const APath: string): Boolean;
+    { Hand the profile to a caller that takes ownership (e.g. a TTermConfig);
+      after this the app config no longer frees it. }
+    function TakeProfile: TTermProfile;
+    property Profile: TTermProfile read FProfile;
+  end;
+
 { Path of the INI in the per-user app config dir. }
 function DefaultConfigPath: string;
 
@@ -209,6 +231,36 @@ begin
   else if SameText(S, 'bottom') then Result := veBottom
   else if SameText(S, 'none') then Result := veNone
   else Result := veRight;
+end;
+
+{ Read every appearance + drawer field of a profile from section Sec into P.
+  Shared by TTermConfig.Load (Profile.* sections) and TTermAppConfig.Load
+  ([App]) so the two never drift apart. }
+procedure ReadProfileFields(Ini: TIniFile; const Sec: string; P: TTermProfile);
+begin
+  P.FontDesc := Ini.ReadString(Sec, 'font', 'Monospace-11');
+  P.FGColor  := HexToColor(Ini.ReadString(Sec, 'fg', 'FFFFFF'));
+  P.BGColor  := HexToColor(Ini.ReadString(Sec, 'bg', '000000'));
+  P.DrawerEnabled := Ini.ReadBool(Sec, 'drawer_enabled', False);
+  P.DrawerName    := Ini.ReadString(Sec, 'drawer_name', 'Drawer');
+  P.DrawerCommand := Ini.ReadString(Sec, 'drawer_command', '');
+  P.DrawerGravity := StrToEdge(Ini.ReadString(Sec, 'drawer_gravity', 'right'));
+  P.DrawerSizeFrac := Ini.ReadFloat(Sec, 'drawer_size', 0.33);
+  case Ini.ReadString(Sec, 'drawer_anim', 'fade') of
+    'assemble': P.DrawerAnim := tdaAssemble;
+    'none':     P.DrawerAnim := tdaNone;
+  else          P.DrawerAnim := tdaFade;
+  end;
+  if Ini.ReadString(Sec, 'drawer_launch', 'onshow') = 'onstart' then
+    P.DrawerLaunch := tdlOnStart else P.DrawerLaunch := tdlOnShow;
+  P.DrawerColorProfile := Ini.ReadString(Sec, 'drawer_colors', '');
+  case Ini.ReadString(Sec, 'drawer_shutdown', 'none') of
+    'signal': P.DrawerShutdown := tdkSignal;
+    'keys':   P.DrawerShutdown := tdkKeys;
+  else        P.DrawerShutdown := tdkNone;
+  end;
+  P.DrawerShutdownSignal := Ini.ReadInteger(Sec, 'drawer_signal', 15);
+  P.DrawerShutdownKeys := Ini.ReadString(Sec, 'drawer_keys', 'exit\r');
 end;
 
 { ---- action (de)serialisation under a key prefix within a section ---- }
@@ -499,30 +551,8 @@ begin
       if AnsiStartsText('Profile.', s) then
       begin
         Name := Copy(s, Length('Profile.') + 1, MaxInt);
-        P := TTermProfile.Create(Name,
-          Ini.ReadString(s, 'font', 'Monospace-11'),
-          HexToColor(Ini.ReadString(s, 'fg', 'FFFFFF')),
-          HexToColor(Ini.ReadString(s, 'bg', '000000')));
-        P.DrawerEnabled := Ini.ReadBool(s, 'drawer_enabled', False);
-        P.DrawerName    := Ini.ReadString(s, 'drawer_name', 'Drawer');
-        P.DrawerCommand := Ini.ReadString(s, 'drawer_command', '');
-        P.DrawerGravity := StrToEdge(Ini.ReadString(s, 'drawer_gravity', 'right'));
-        P.DrawerSizeFrac := Ini.ReadFloat(s, 'drawer_size', 0.33);
-        case Ini.ReadString(s, 'drawer_anim', 'fade') of
-          'assemble': P.DrawerAnim := tdaAssemble;
-          'none':     P.DrawerAnim := tdaNone;
-        else          P.DrawerAnim := tdaFade;
-        end;
-        if Ini.ReadString(s, 'drawer_launch', 'onshow') = 'onstart' then
-          P.DrawerLaunch := tdlOnStart else P.DrawerLaunch := tdlOnShow;
-        P.DrawerColorProfile := Ini.ReadString(s, 'drawer_colors', '');
-        case Ini.ReadString(s, 'drawer_shutdown', 'none') of
-          'signal': P.DrawerShutdown := tdkSignal;
-          'keys':   P.DrawerShutdown := tdkKeys;
-        else        P.DrawerShutdown := tdkNone;
-        end;
-        P.DrawerShutdownSignal := Ini.ReadInteger(s, 'drawer_signal', 15);
-        P.DrawerShutdownKeys := Ini.ReadString(s, 'drawer_keys', 'exit\r');
+        P := TTermProfile.Create(Name, 'Monospace-11', clWhite, TfpgColor($000000));
+        ReadProfileFields(Ini, s, P);
         AddProfile(P);
       end
       else if AnsiStartsText('Key.', s) then
@@ -629,6 +659,45 @@ begin
   finally
     Ini.Free;
   end;
+end;
+
+{ TTermAppConfig }
+
+constructor TTermAppConfig.Create;
+begin
+  inherited Create;
+  FProfile := TTermProfile.Create('App', 'Monospace-11', clWhite, TfpgColor($000000));
+end;
+
+destructor TTermAppConfig.Destroy;
+begin
+  FProfile.Free;          { nil after TakeProfile, so this is a no-op then }
+  inherited Destroy;
+end;
+
+function TTermAppConfig.Load(const APath: string): Boolean;
+var
+  Ini: TIniFile;
+begin
+  Result := FileExists(APath);
+  if not Result then Exit;
+  Ini := TIniFile.Create(APath);
+  try
+    Title   := Ini.ReadString('App', 'title', '');
+    Command := Ini.ReadString('App', 'command', '');
+    Theme   := Ini.ReadString('App', 'theme', '');
+    { Same keys a profile uses, read straight into the app's profile. }
+    ReadProfileFields(Ini, 'App', FProfile);
+    FProfile.Name := Ini.ReadString('App', 'profile_name', 'App');
+  finally
+    Ini.Free;
+  end;
+end;
+
+function TTermAppConfig.TakeProfile: TTermProfile;
+begin
+  Result := FProfile;
+  FProfile := nil;
 end;
 
 end.

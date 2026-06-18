@@ -38,6 +38,7 @@ type
     View: TTerminalFPGUIView;
     Drawer: TTermDrawer;          // hover side-panel, nil when profile disables it
     NeedStart: Boolean;
+    StartCmd: string;             // app-mode main command; '' = login shell
     function Controller: TTerminalController;
   end;
 
@@ -58,6 +59,8 @@ type
     FMenuTab: TTermTab;
     FNextNum: Integer;
     FShown: Boolean;
+    FAppMode: Boolean;             // single-program launch; tab strip hidden
+    FTabStripH: Integer;           // height reserved for the tab strip (0 in app mode)
     FFlashTimer: TfpgTimer;
     FFlashSaved: string;
     FLinkHoverSaved: string;       // window title stashed while hovering a link
@@ -125,7 +128,10 @@ type
   public
     destructor Destroy; override;
     function AddTab(AController: TTerminalController; const ATitle: string;
-                    AStartShell: Boolean): TTermTab;
+                    AStartShell: Boolean; const AStartCmd: string = ''): TTermTab;
+    { Single-program "app mode": hide the tab strip and give the content the full
+      window.  Call before AddTab. }
+    procedure EnterAppMode;
     { Free every window still open (called once the message loop has ended). }
     class procedure FreeAll;
     property Config: TTermConfig read FConfig write FConfig;
@@ -156,6 +162,7 @@ begin
   SetPosition(100, 100, 900, 560);
   FTabs := TFPList.Create;
   FNextNum := 1;
+  FTabStripH := TAB_STRIP_H;
   if FWindows = nil then
     FWindows := TFPList.Create;
   FWindows.Add(Self);
@@ -239,16 +246,16 @@ var
   i, vw, vh: Integer;
 begin
   inherited HandleResize(awidth, aheight);
-  if FTabBar <> nil then
+  if (FTabBar <> nil) and not FAppMode then
     FTabBar.SetPosition(0, 0, awidth, TAB_STRIP_H);
   if FContent <> nil then
-    FContent.SetPosition(0, TAB_STRIP_H, awidth, aheight - TAB_STRIP_H);
+    FContent.SetPosition(0, FTabStripH, awidth, aheight - FTabStripH);
 
   { Anchors don't reliably cascade to the views inside FContent in this fpGUI
     build, so size them all explicitly (background tabs included, so they're
     correct when shown). }
   vw := awidth;
-  vh := aheight - TAB_STRIP_H;
+  vh := aheight - FTabStripH;
   if FTabs <> nil then
     for i := 0 to FTabs.Count - 1 do
       if TTermTab(FTabs[i]).View <> nil then
@@ -308,7 +315,10 @@ begin
     if Tab.NeedStart then
     begin
       Tab.NeedStart := False;
-      Tab.View.StartShell;
+      if Tab.StartCmd <> '' then
+        Tab.View.StartProgram(Tab.StartCmd)
+      else
+        Tab.View.StartShell;
     end;
   end;
   Tab := ActiveTab;
@@ -317,7 +327,7 @@ begin
 end;
 
 function TTermWindow.AddTab(AController: TTerminalController;
-  const ATitle: string; AStartShell: Boolean): TTermTab;
+  const ATitle: string; AStartShell: Boolean; const AStartCmd: string): TTermTab;
 var
   View: TTerminalFPGUIView;
   Ctrl: TTerminalController;
@@ -375,6 +385,8 @@ begin
 
   SetupTabDrawer(Result);               // hover side-panel, if the profile enables it
 
+  Result.StartCmd := AStartCmd;
+
   SelectTab(Idx);                       // shows this view, hides others
 
   if AStartShell then
@@ -386,6 +398,16 @@ begin
   end;
 end;
 
+procedure TTermWindow.EnterAppMode;
+begin
+  FAppMode := True;
+  FTabStripH := 0;
+  if FTabBar <> nil then
+    FTabBar.Visible := False;
+  if FContent <> nil then
+    FContent.SetPosition(0, 0, Width, Height);
+end;
+
 procedure TTermWindow.UpdateMinSize(AView: TTerminalFPGUIView);
 var
   MinW, MinH: Integer;
@@ -393,13 +415,16 @@ begin
   if AView = nil then Exit;
   AView.GetMinPixelSize(MinW, MinH);
   MinWidth := MinW;
-  MinHeight := MinH + TAB_STRIP_H;
+  MinHeight := MinH + FTabStripH;
 end;
 
 procedure TTermWindow.StartTabShell(ATab: TTermTab);
 begin
   if (ATab = nil) or (ATab.View = nil) then Exit;
-  ATab.View.StartShell;
+  if ATab.StartCmd <> '' then
+    ATab.View.StartProgram(ATab.StartCmd)   { app-mode main program }
+  else
+    ATab.View.StartShell;
   ATab.View.SetFocus;
 end;
 
