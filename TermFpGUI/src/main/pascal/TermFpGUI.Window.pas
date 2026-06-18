@@ -43,11 +43,17 @@ type
 
   TTermWindow = class(TfpgForm)
   private
+  class var
+    { Every live TTermWindow (main + torn-off), so the app stays up until the
+      last one closes and MainProc can free whatever remains. }
+    FWindows: TFPList;
+  private
     FConfig: TTermConfig;          // shared, not owned
     FTabBar: TTermTabBar;
     FContent: TfpgBevel;
     FMenu: TfpgPopupMenu;          // hamburger menu (rebuilt on open)
     FTabMenu: TfpgPopupMenu;       // tab right-click menu
+    FMiMoveItem: TfpgMenuItem;     // "Move to New Window" — hidden for a lone tab
     FTabs: TFPList;                // of TTermTab
     FMenuTab: TTermTab;
     FNextNum: Integer;
@@ -66,6 +72,7 @@ type
     procedure BuildTabMenu;
     procedure FormShow(Sender: TObject);
     procedure FormClose(Sender: TObject; var CloseAction: TCloseAction);
+    procedure FormCloseQuery(Sender: TObject; var ACanClose: Boolean);
     { tab bar events }
     procedure TabSelected(AIndex: Integer);
     procedure TabRightClicked(AIndex, AX, AY: Integer);
@@ -119,6 +126,8 @@ type
     destructor Destroy; override;
     function AddTab(AController: TTerminalController; const ATitle: string;
                     AStartShell: Boolean): TTermTab;
+    { Free every window still open (called once the message loop has ended). }
+    class procedure FreeAll;
     property Config: TTermConfig read FConfig write FConfig;
   end;
 
@@ -147,6 +156,9 @@ begin
   SetPosition(100, 100, 900, 560);
   FTabs := TFPList.Create;
   FNextNum := 1;
+  if FWindows = nil then
+    FWindows := TFPList.Create;
+  FWindows.Add(Self);
 
   { Anchors (Delphi/Lazarus-style, as used by the project's own view form):
     the tab strip spans the full width at the top; the content panel fills the
@@ -174,6 +186,11 @@ begin
   FDisposeTimer.Enabled := False;
 
   OnShow := @FormShow;
+  { Before the close commits, if this is the app's main form and other windows
+    remain, hand the main-form role to one of them — otherwise fpGUI would quit
+    the whole app (Terminate) when the main window closes. The last window left
+    keeps the role and quits normally. }
+  OnCloseQuery := @FormCloseQuery;
   { Free the window on close (fpGUI defers it safely via FPGM_FREEME for a
     non-main form).  Torn-off windows are otherwise only hidden and never freed,
     which strands their Wayland buffer manager in the present queue with a dead
@@ -185,6 +202,32 @@ end;
 procedure TTermWindow.FormClose(Sender: TObject; var CloseAction: TCloseAction);
 begin
   CloseAction := caFree;
+end;
+
+{ Runs before fpGUI captures IsMainForm, so reassigning MainForm here decides
+  whether closing this window terminates the app. }
+procedure TTermWindow.FormCloseQuery(Sender: TObject; var ACanClose: Boolean);
+var
+  i: Integer;
+begin
+  ACanClose := True;
+  if fpgApplication.MainForm <> Self then Exit;
+  if FWindows = nil then Exit;
+  for i := 0 to FWindows.Count - 1 do
+    if FWindows[i] <> Pointer(Self) then
+    begin
+      fpgApplication.MainForm := TTermWindow(FWindows[i]);
+      Exit;
+    end;
+  { No other window: this is the last one, leave it as MainForm so the close
+    terminates the app normally. }
+end;
+
+class procedure TTermWindow.FreeAll;
+begin
+  if FWindows = nil then Exit;
+  while FWindows.Count > 0 do
+    TTermWindow(FWindows[0]).Free;   { Destroy removes itself from FWindows }
 end;
 
 { Explicitly lay out the two top-level children on every resize.  fpGUI's
@@ -222,6 +265,8 @@ var
   Tab: TTermTab;
   Ctrl: TTerminalController;
 begin
+  if FWindows <> nil then
+    FWindows.Remove(Self);
   FreeAndNil(FFlashTimer);
   FreeAndNil(FDisposeTimer);          { stop deferred disposal before teardown }
   FreeAndNil(FPendingDispose);
@@ -247,7 +292,7 @@ begin
   FTabMenu := TfpgPopupMenu.Create(Self);
   FTabMenu.AddMenuItem('New Tab',            '', @MiNewTab);
   FTabMenu.AddMenuItem('-',                  '', nil);
-  FTabMenu.AddMenuItem('Move to New Window', '', @MiMoveToWindow);
+  FMiMoveItem := FTabMenu.AddMenuItem('Move to New Window', '', @MiMoveToWindow);
   FTabMenu.AddMenuItem('Close Tab',          '', @MiCloseTab);
 end;
 
@@ -461,6 +506,10 @@ procedure TTermWindow.TabRightClicked(AIndex, AX, AY: Integer);
 begin
   if (AIndex < 0) or (AIndex >= FTabs.Count) then Exit;
   FMenuTab := TTermTab(FTabs[AIndex]);
+  { Moving the only tab to a new window is a no-op (it just recreates this
+    window), so hide it when there's a single tab. }
+  if FMiMoveItem <> nil then
+    FMiMoveItem.Visible := FTabs.Count > 1;
   FTabMenu.ShowAt(FTabBar, AX, FTabBar.Height);
 end;
 
@@ -530,6 +579,7 @@ begin
   Tab := FMenuTab;
   FMenuTab := nil;
   if (Tab = nil) or (Tab.Controller = nil) then Exit;
+  if FTabs.Count <= 1 then Exit;   { nothing to gain moving the only tab }
 
   Ctrl  := Tab.Controller;
   Title := TitleOfTab(Tab);

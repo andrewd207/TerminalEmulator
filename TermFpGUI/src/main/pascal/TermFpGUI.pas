@@ -46,7 +46,9 @@ begin
     Win.Show;
     fpgApplication.Run;
   finally
-    Win.Free;
+    { Win may already have been freed during the run (e.g. its window closed
+      while another stayed open), so free whatever windows remain, not Win. }
+    TTermWindow.FreeAll;
     Cfg.Free;
   end;
 end;
