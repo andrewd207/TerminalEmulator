@@ -27,6 +27,7 @@ type
     FActive: Boolean;
     FTermProgram: string;
     FTermName: string;
+    FShutdownSignal: Integer;
   public
     class function CreateDefaultBackend(ACore: TTerminalCore; AParser: TTerminalParser): TTerminalBackendBase;
     constructor Create(ACore: TTerminalCore; AParser: TTerminalParser); virtual;
@@ -44,12 +45,19 @@ type
       in the foreground. Returns False if the backend can't determine this
       (e.g. ConPTY on Windows). }
     function SubProcessRunning: Boolean; virtual;
+    { Deliver a signal to the hosted child now (no-op where unsupported, e.g.
+      Windows). }
+    procedure SendSignal(ASignal: Integer); virtual;
 
     property Core: TTerminalCore read FCore;
     property Parser: TTerminalParser read FParser;
     property Active: Boolean read FActive;
     property TermProgram: string read FTermProgram write FTermProgram;
     property TermName: string read FTermName write FTermName;
+    { Signal sent to the child on Stop/teardown.  Defaults to SIGTERM (15) so
+      ordinary tabs behave as before; set to 0 to skip the explicit kill and let
+      closing the PTY master deliver SIGHUP/EOF naturally. }
+    property ShutdownSignal: Integer read FShutdownSignal write FShutdownSignal;
   end;
 
 implementation
@@ -70,6 +78,7 @@ begin
   FActive := False;
   FTermProgram := 'fpc-terminal';
   FTermName := 'xterm-256color';
+  FShutdownSignal := 15;   { SIGTERM }
 end;
 
 destructor TTerminalBackendBase.Destroy;
@@ -80,6 +89,11 @@ end;
 function TTerminalBackendBase.SubProcessRunning: Boolean;
 begin
   Result := False;
+end;
+
+procedure TTerminalBackendBase.SendSignal(ASignal: Integer);
+begin
+  { No-op by default; Unix overrides. }
 end;
 
 end.

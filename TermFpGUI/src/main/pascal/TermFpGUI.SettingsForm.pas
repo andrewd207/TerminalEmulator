@@ -105,6 +105,9 @@ type
     FDrawerAnim: TfpgComboBox;
     FDrawerLaunch: TfpgComboBox;
     FDrawerColors: TfpgComboBox;
+    FDrawerShutdown: TfpgComboBox;
+    FDrawerSignal: TfpgComboBox;
+    FDrawerKeys: TfpgEdit;
     procedure SyncSwatches;
     procedure ChooseFontClick(Sender: TObject);
     procedure ChooseFgClick(Sender: TObject);
@@ -250,7 +253,7 @@ begin
   inherited Create(AOwner);
   WindowTitle := 'Edit Profile';
   WindowPosition := wpScreenCenter;
-  SetPosition(0, 0, 420, 446);
+  SetPosition(0, 0, 420, 512);
   Sizeable := False;
   FFontDesc := 'Monospace-11';
   FFg := clWhite;
@@ -359,13 +362,43 @@ begin
   FDrawerColors.Items.Add('(this profile)');
   FDrawerColors.FocusItem := 0;
 
+  Lbl := TfpgLabel.Create(Self);
+  Lbl.SetPosition(12, 386, 70, 24);
+  Lbl.Text := 'On close:';
+  FDrawerShutdown := TfpgComboBox.Create(Self);
+  FDrawerShutdown.SetPosition(86, 384, 150, 24);
+  FDrawerShutdown.Items.Add('Let it fail');     { tdkNone }
+  FDrawerShutdown.Items.Add('Send signal');     { tdkSignal }
+  FDrawerShutdown.Items.Add('Send keys');       { tdkKeys }
+  FDrawerShutdown.FocusItem := 0;
+  Lbl := TfpgLabel.Create(Self);
+  Lbl.SetPosition(244, 386, 44, 24);
+  Lbl.Text := 'Signal:';
+  FDrawerSignal := TfpgComboBox.Create(Self);
+  FDrawerSignal.SetPosition(292, 384, 116, 24);
+  FDrawerSignal.Items.Add('SIGTERM (15)');
+  FDrawerSignal.Items.Add('SIGHUP (1)');
+  FDrawerSignal.Items.Add('SIGINT (2)');
+  FDrawerSignal.Items.Add('SIGQUIT (3)');
+  FDrawerSignal.Items.Add('SIGKILL (9)');
+  FDrawerSignal.FocusItem := 0;
+
+  Lbl := TfpgLabel.Create(Self);
+  Lbl.SetPosition(12, 418, 70, 24);
+  Lbl.Text := 'Keys:';
+  FDrawerKeys := TfpgEdit.Create(Self);
+  FDrawerKeys.SetPosition(86, 416, 322, 24);
+  Lbl := TfpgLabel.Create(Self);
+  Lbl.SetPosition(86, 442, 322, 16);
+  Lbl.Text := '(for "Send keys"; escapes: \r \n \e \xNN, ^D = Ctrl-D)';
+
   Btn := TfpgButton.Create(Self);
   Btn.Text := 'Cancel';
-  Btn.SetPosition(236, 410, 80, 26);
+  Btn.SetPosition(236, 476, 80, 26);
   Btn.OnClick := @CancelClick;
   Btn := TfpgButton.Create(Self);
   Btn.Text := 'OK';
-  Btn.SetPosition(324, 410, 84, 26);
+  Btn.SetPosition(324, 476, 84, 26);
   Btn.OnClick := @OkClick;
 end;
 
@@ -396,6 +429,29 @@ begin
     2: Result := veTop;
     3: Result := veBottom;
   else Result := veRight;
+  end;
+end;
+
+{ Map between the signal combo's row order and the actual signal number. }
+function SignalToIndex(ASig: Integer): Integer;
+begin
+  case ASig of
+    1: Result := 1;   { HUP }
+    2: Result := 2;   { INT }
+    3: Result := 3;   { QUIT }
+    9: Result := 4;   { KILL }
+  else Result := 0;   { TERM }
+  end;
+end;
+
+function IndexToSignal(I: Integer): Integer;
+begin
+  case I of
+    1: Result := 1;
+    2: Result := 2;
+    3: Result := 3;
+    4: Result := 9;
+  else Result := 15;
   end;
 end;
 
@@ -441,6 +497,13 @@ begin
     if idx >= 0 then FDrawerColors.FocusItem := idx
     else FDrawerColors.FocusItem := 0;
   end;
+  case P.DrawerShutdown of
+    tdkSignal: FDrawerShutdown.FocusItem := 1;
+    tdkKeys:   FDrawerShutdown.FocusItem := 2;
+  else         FDrawerShutdown.FocusItem := 0;
+  end;
+  FDrawerSignal.FocusItem := SignalToIndex(P.DrawerShutdownSignal);
+  FDrawerKeys.Text := P.DrawerShutdownKeys;
 end;
 
 procedure TProfileEditForm.StoreTo(P: TTermProfile);
@@ -471,6 +534,13 @@ begin
     P.DrawerColorProfile := ''
   else
     P.DrawerColorProfile := FDrawerColors.Text;
+  case FDrawerShutdown.FocusItem of
+    1: P.DrawerShutdown := tdkSignal;
+    2: P.DrawerShutdown := tdkKeys;
+  else P.DrawerShutdown := tdkNone;
+  end;
+  P.DrawerShutdownSignal := IndexToSignal(FDrawerSignal.FocusItem);
+  P.DrawerShutdownKeys := FDrawerKeys.Text;
 end;
 
 function TProfileEditForm.ProfileName: string;

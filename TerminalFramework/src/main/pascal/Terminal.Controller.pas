@@ -50,10 +50,17 @@ type
       before the shell starts. Backend-dependent: ConPTY/Windows can't
       currently distinguish, and reports False. }
     function SubProcessRunning: Boolean;
+    { Deliver a signal to the hosted child immediately. }
+    procedure SendSignal(ASignal: Integer);
+    function GetShutdownSignal: Integer;
+    procedure SetShutdownSignal(AValue: Integer);
 
     property Core: TTerminalCore read FCore;
     property Parser: TTerminalParser read FParser;
     property Backend: TTerminalBackendBase read FBackend;
+    { Signal delivered to the child when the controller/backend is torn down.
+      Defaults to SIGTERM; 0 = close the PTY without an explicit kill. }
+    property ShutdownSignal: Integer read GetShutdownSignal write SetShutdownSignal;
   end;
 
 implementation
@@ -189,6 +196,23 @@ end;
 function TTerminalController.SubProcessRunning: Boolean;
 begin
   Result := (FBackend <> nil) and FBackend.SubProcessRunning;
+end;
+
+procedure TTerminalController.SendSignal(ASignal: Integer);
+begin
+  if FBackend <> nil then
+    FBackend.SendSignal(ASignal);
+end;
+
+function TTerminalController.GetShutdownSignal: Integer;
+begin
+  if FBackend <> nil then Result := FBackend.ShutdownSignal else Result := 0;
+end;
+
+procedure TTerminalController.SetShutdownSignal(AValue: Integer);
+begin
+  if FBackend <> nil then
+    FBackend.ShutdownSignal := AValue;
 end;
 
 end.

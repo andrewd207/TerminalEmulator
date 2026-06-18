@@ -154,6 +154,7 @@ type
     procedure DrawerViewKey(Sender: TObject; AKeyCode: Word;
       AShift: TShiftState; var AHandled: Boolean);
     procedure Relaunch;
+    procedure ApplyShutdownPolicy;
   public
     constructor Create(AParent: TfpgWidget; AMainView: TTerminalFPGUIView;
                        AProfile: TTermProfile; AColorProfile: TTermProfile = nil);
@@ -202,6 +203,67 @@ const
 function Lerp8(a, b: Byte; t: Double): Byte; inline;
 begin
   Result := Byte(Round(a + (b - a) * t));
+end;
+
+{ Decode a shutdown key string into raw bytes for the PTY.  Escapes: \n \r \t
+  \e (ESC) \0 \\ \xNN (hex byte), and ^X for a control char (^D = #4, ^C = #3).
+  Anything else is taken literally, so plain "exit\r" works as expected. }
+function DecodeKeySeq(const S: string): RawByteString;
+var
+  i, h, d: Integer;
+
+  function HexDigit(c: Char; out v: Integer): Boolean;
+  begin
+    Result := True;
+    case c of
+      '0'..'9': v := Ord(c) - Ord('0');
+      'a'..'f': v := Ord(c) - Ord('a') + 10;
+      'A'..'F': v := Ord(c) - Ord('A') + 10;
+    else        Result := False;
+    end;
+  end;
+
+begin
+  Result := '';
+  i := 1;
+  while i <= Length(S) do
+  begin
+    if (S[i] = '\') and (i < Length(S)) then
+    begin
+      Inc(i);
+      case S[i] of
+        'n': Result := Result + #10;
+        'r': Result := Result + #13;
+        't': Result := Result + #9;
+        'e': Result := Result + #27;
+        '0': Result := Result + #0;
+        '\': Result := Result + '\';
+        'x', 'X':
+          begin
+            h := 0;
+            if (i < Length(S)) and HexDigit(S[i + 1], d) then
+            begin
+              Inc(i); h := d;
+              if (i < Length(S)) and HexDigit(S[i + 1], d) then
+              begin Inc(i); h := h * 16 + d; end;
+              Result := Result + Chr(h);
+            end
+            else
+              Result := Result + S[i];   { lone \x — keep the x }
+          end;
+      else
+        Result := Result + S[i];
+      end;
+    end
+    else if (S[i] = '^') and (i < Length(S)) then
+    begin
+      Inc(i);
+      Result := Result + Chr(Ord(UpCase(S[i])) and 31);
+    end
+    else
+      Result := Result + S[i];
+    Inc(i);
+  end;
 end;
 
 function BlendColor(c1, c2: TfpgColor; t: Double): TfpgColor;
@@ -480,6 +542,9 @@ begin
     event firing into half-freed state during an async window close. }
   FOnPersist := nil;
   FOnHostKey := nil;
+  { Decide how the hosted program should be stopped before we free its
+    controller (whose teardown would otherwise just SIGTERM it). }
+  ApplyShutdownPolicy;
   if FHandleTimer <> nil then FHandleTimer.Enabled := False;
   if FAnim <> nil then FAnim.Stop;
   if FView <> nil then
@@ -912,6 +977,43 @@ begin
   FStarted := True;
   FView.StartProgram(FProfile.DrawerCommand);
   if IsOpen and FActive then FView.SetFocus;
+end;
+
+{ Apply the profile's shutdown policy to a still-running hosted program, then
+  set how the controller's teardown finishes the job.  Mirrors the user's rule:
+  a terminal copy idling with no child needs nothing; a live custom program (or
+  one with a foreground child) gets the configured signal / keys / plain close. }
+procedure TTermDrawer.ApplyShutdownPolicy;
+var
+  IsCustom: Boolean;
+begin
+  { Nothing hosted, or it already died and is awaiting relaunch — no-op. }
+  if (FController = nil) or (not FStarted) or FExited then Exit;
+
+  IsCustom := Trim(FProfile.DrawerCommand) <> '';
+
+  { A terminal copy sitting at an idle shell prompt (no foreground child) just
+    closes; don't even SIGTERM it. }
+  if (not IsCustom) and (not FController.SubProcessRunning) then
+  begin
+    FController.ShutdownSignal := 0;
+    Exit;
+  end;
+
+  case FProfile.DrawerShutdown of
+    tdkSignal:
+      { Let the controller's teardown deliver the chosen signal. }
+      FController.ShutdownSignal := FProfile.DrawerShutdownSignal;
+    tdkKeys:
+      begin
+        { Type the keys now (best effort), then let the PTY close finish it —
+          no extra SIGTERM, so the program can exit on its own terms. }
+        FController.SendInput(DecodeKeySeq(FProfile.DrawerShutdownKeys));
+        FController.ShutdownSignal := 0;
+      end;
+    else { tdkNone — let it fail when the console closes }
+      FController.ShutdownSignal := 0;
+  end;
 end;
 
 procedure TTermDrawer.DoSplitterDrag(Sender: TObject);

@@ -47,6 +47,7 @@ type
     function Resize(ACols, ARows: Integer): Boolean; override;
     function IsRunning: Boolean; override;
     function SubProcessRunning: Boolean; override;
+    procedure SendSignal(ASignal: Integer); override;
 
     property MasterFD: cint read FMasterFD;
     property ChildPID: TPid read FChildPID;
@@ -244,12 +245,22 @@ var
 begin
   if FChildPID > 0 then
   begin
-    fpKill(FChildPID, SIGTERM);
+    { FShutdownSignal = 0 means "don't kill" — just close the master below, so
+      the child receives SIGHUP/EOF naturally (the drawer's "let it fail" /
+      key-driven shutdown policies rely on this). }
+    if FShutdownSignal > 0 then
+      fpKill(FChildPID, FShutdownSignal);
     fpWaitPid(FChildPID, @Status, WNOHANG);
     FChildPID := 0;
   end;
   InternalCloseMaster;
   FActive := False;
+end;
+
+procedure TTerminalBackendUnix.SendSignal(ASignal: Integer);
+begin
+  if (FChildPID > 0) and (ASignal > 0) then
+    fpKill(FChildPID, ASignal);
 end;
 
 procedure DumpRawBytes(const AData: RawByteString);

@@ -32,6 +32,12 @@ type
   TTermDrawerAnim = (tdaFade, tdaAssemble, tdaNone);
   { When the drawer's program is launched. }
   TTermDrawerLaunch = (tdlOnShow, tdlOnStart);
+  { What to do to a still-running hosted program when the drawer's tab/window
+    closes.  Only meaningful for a live custom program — a terminal copy idling
+    at its shell prompt just closes (tdkNone behaviour) regardless. }
+  TTermDrawerShutdown = (tdkNone,    // let it fail when the console closes
+                         tdkSignal,  // send DrawerShutdownSignal to the child
+                         tdkKeys);   // type DrawerShutdownKeys (e.g. exit\r)
 
   TTermProfile = class
   public
@@ -50,6 +56,9 @@ type
     DrawerAnim: TTermDrawerAnim;
     DrawerLaunch: TTermDrawerLaunch;
     DrawerColorProfile: string;    // profile whose fg/bg the drawer uses; '' = own
+    DrawerShutdown: TTermDrawerShutdown; // how to stop a live custom program
+    DrawerShutdownSignal: Integer; // signal number for tdkSignal (e.g. 15=TERM)
+    DrawerShutdownKeys: string;    // key/byte seq for tdkKeys (\n \r \e \xNN ^D)
     constructor Create(const AName, AFont: string; AFG, ABG: TfpgColor);
     procedure ApplyTo(AView: TTerminalFPGUIView);
   end;
@@ -247,6 +256,9 @@ begin
   DrawerAnim := tdaFade;
   DrawerLaunch := tdlOnShow;
   DrawerColorProfile := '';
+  DrawerShutdown := tdkNone;
+  DrawerShutdownSignal := 15;   { SIGTERM }
+  DrawerShutdownKeys := 'exit\r';
 end;
 
 procedure TTermProfile.ApplyTo(AView: TTerminalFPGUIView);
@@ -504,6 +516,13 @@ begin
         if Ini.ReadString(s, 'drawer_launch', 'onshow') = 'onstart' then
           P.DrawerLaunch := tdlOnStart else P.DrawerLaunch := tdlOnShow;
         P.DrawerColorProfile := Ini.ReadString(s, 'drawer_colors', '');
+        case Ini.ReadString(s, 'drawer_shutdown', 'none') of
+          'signal': P.DrawerShutdown := tdkSignal;
+          'keys':   P.DrawerShutdown := tdkKeys;
+        else        P.DrawerShutdown := tdkNone;
+        end;
+        P.DrawerShutdownSignal := Ini.ReadInteger(s, 'drawer_signal', 15);
+        P.DrawerShutdownKeys := Ini.ReadString(s, 'drawer_keys', 'exit\r');
         AddProfile(P);
       end
       else if AnsiStartsText('Key.', s) then
@@ -584,6 +603,13 @@ begin
         Ini.WriteString(Sec, 'drawer_launch', 'onstart')
       else Ini.WriteString(Sec, 'drawer_launch', 'onshow');
       Ini.WriteString(Sec, 'drawer_colors', GetProfile(i).DrawerColorProfile);
+      case GetProfile(i).DrawerShutdown of
+        tdkSignal: Ini.WriteString(Sec, 'drawer_shutdown', 'signal');
+        tdkKeys:   Ini.WriteString(Sec, 'drawer_shutdown', 'keys');
+      else         Ini.WriteString(Sec, 'drawer_shutdown', 'none');
+      end;
+      Ini.WriteInteger(Sec, 'drawer_signal', GetProfile(i).DrawerShutdownSignal);
+      Ini.WriteString(Sec, 'drawer_keys', GetProfile(i).DrawerShutdownKeys);
     end;
     for i := 0 to FKeys.Count - 1 do
     begin
