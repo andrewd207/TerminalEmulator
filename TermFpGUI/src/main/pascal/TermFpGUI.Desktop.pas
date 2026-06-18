@@ -49,6 +49,15 @@ function DesktopInstalled: Boolean;
   and persists it when the user picks "Don't ask again". }
 procedure MaybePromptInstall(AOwner: TfpgWidget; ACfg: TTermConfig);
 
+{ Like MaybePromptInstall, but for an --app launch profile: its own name + icon,
+  and an Exec that re-launches this binary with "--app <AConfigPath>".  Dismissal
+  is tracked per launcher (ACfg.AppDesktopDismissed). }
+procedure MaybePromptInstallApp(AOwner: TfpgWidget; AApp: TTermAppConfig;
+  const AConfigPath: string; ACfg: TTermConfig);
+
+{ Filesystem-safe launcher basename (lowercase, [a-z0-9-]) from a display name. }
+function SanitizeBaseName(const AName: string): string;
+
 { Write the per-user .desktop + scalable SVG icon and refresh the desktop
   database.  Returns True on success.  AError carries a message on failure. }
 function InstallDesktop(out AError: string): Boolean;
@@ -116,17 +125,12 @@ begin
   Result := IncludeTrailingPathDelimiter(Result);
 end;
 
-function LocalDesktopPath: string;
-begin
-  Result := XdgDataHome + 'applications' + PathDelim + CDesktopBaseName + '.desktop';
-end;
-
-function DesktopInstalled: Boolean;
+function DesktopInstalledFor(const ABase: string): Boolean;
 var
   dirs, d: string;
   p: Integer;
 begin
-  Result := FileExists(LocalDesktopPath);
+  Result := FileExists(XdgDataHome + 'applications' + PathDelim + ABase + '.desktop');
   if Result then Exit;
   { System dirs from XDG_DATA_DIRS (default /usr/local/share:/usr/share). }
   dirs := GetEnvironmentVariable('XDG_DATA_DIRS');
@@ -138,9 +142,38 @@ begin
     else begin d := Copy(dirs, 1, p - 1); Delete(dirs, 1, p); end;
     if d = '' then Continue;
     if FileExists(IncludeTrailingPathDelimiter(d) + 'applications' + PathDelim
-                  + CDesktopBaseName + '.desktop') then
+                  + ABase + '.desktop') then
       Exit(True);
   end;
+end;
+
+function DesktopInstalled: Boolean;
+begin
+  Result := DesktopInstalledFor(CDesktopBaseName);
+end;
+
+function SanitizeBaseName(const AName: string): string;
+var
+  i: Integer;
+  c: Char;
+  lastDash: Boolean;
+begin
+  Result := '';
+  lastDash := False;
+  for i := 1 to Length(AName) do
+  begin
+    c := AName[i];
+    case c of
+      'A'..'Z': begin Result := Result + Chr(Ord(c) + 32); lastDash := False; end;
+      'a'..'z', '0'..'9': begin Result := Result + c; lastDash := False; end;
+    else
+      { collapse runs of other chars into a single dash }
+      if (Result <> '') and not lastDash then
+      begin Result := Result + '-'; lastDash := True; end;
+    end;
+  end;
+  while (Result <> '') and (Result[Length(Result)] = '-') do
+    SetLength(Result, Length(Result) - 1);
 end;
 
 { Absolute path to the running binary, resolving a bare name via PATH. }
@@ -163,19 +196,21 @@ begin
   end;
 end;
 
-function InstallDesktop(out AError: string): Boolean;
+{ Write one per-user .desktop + scalable SVG icon for a launcher described by
+  the parameters, then refresh the desktop/icon databases. }
+function InstallEntry(const ABase, ADisplayName, AExec, AIconSVG: string;
+  out AError: string): Boolean;
 var
   appDir, iconDir, desktopPath, iconPath: string;
-  sl: TStringList;
-  svg: TStringList;
+  sl, svg: TStringList;
 begin
   Result := False;
   AError := '';
   appDir := XdgDataHome + 'applications' + PathDelim;
   iconDir := XdgDataHome + 'icons' + PathDelim + 'hicolor' + PathDelim
            + 'scalable' + PathDelim + 'apps' + PathDelim;
-  desktopPath := appDir + CDesktopBaseName + '.desktop';
-  iconPath := iconDir + CDesktopBaseName + '.svg';
+  desktopPath := appDir + ABase + '.desktop';
+  iconPath := iconDir + ABase + '.svg';
   try
     if not ForceDirectories(appDir) then
       raise Exception.Create('cannot create ' + appDir);
@@ -184,7 +219,7 @@ begin
 
     svg := TStringList.Create;
     try
-      svg.Text := CIconSVG;
+      svg.Text := AIconSVG;
       svg.SaveToFile(iconPath);
     finally
       svg.Free;
@@ -195,17 +230,17 @@ begin
       sl.Add('[Desktop Entry]');
       sl.Add('Type=Application');
       sl.Add('Version=1.0');
-      sl.Add('Name=TermFpGUI');
+      sl.Add('Name=' + ADisplayName);
       sl.Add('GenericName=Terminal');
       sl.Add('Comment=Tabbed terminal emulator');
-      sl.Add('Exec=' + BinaryPath);
-      sl.Add('Icon=' + CDesktopBaseName);
+      sl.Add('Exec=' + AExec);
+      sl.Add('Icon=' + ABase);
       sl.Add('Terminal=false');
       sl.Add('Categories=System;TerminalEmulator;');
       sl.Add('Keywords=terminal;shell;console;command;');
       sl.Add('StartupNotify=true');
       { Match the Wayland app_id so the compositor finds this entry's icon. }
-      sl.Add('StartupWMClass=' + CDesktopBaseName);
+      sl.Add('StartupWMClass=' + ABase);
       sl.SaveToFile(desktopPath);
     finally
       sl.Free;
@@ -221,6 +256,11 @@ begin
   end;
 end;
 
+function InstallDesktop(out AError: string): Boolean;
+begin
+  Result := InstallEntry(CDesktopBaseName, 'TermFpGUI', BinaryPath, CIconSVG, AError);
+end;
+
 { ===================== prompt ===================== }
 
 type
@@ -230,17 +270,18 @@ type
   TInstallPromptForm = class(TfpgForm)
   private
     FChoice: TInstallChoice;
+    FLabel: TfpgLabel;
     procedure InstallClick(Sender: TObject);
     procedure LaterClick(Sender: TObject);
     procedure NeverClick(Sender: TObject);
   public
     constructor Create(AOwner: TComponent); override;
+    procedure SetPrompt(const AText: string);
     property Choice: TInstallChoice read FChoice;
   end;
 
 constructor TInstallPromptForm.Create(AOwner: TComponent);
 var
-  Lbl: TfpgLabel;
   Btn: TfpgButton;
 begin
   inherited Create(AOwner);
@@ -250,10 +291,10 @@ begin
   Sizeable := False;
   FChoice := icLater;
 
-  Lbl := TfpgLabel.Create(Self);
-  Lbl.SetPosition(16, 16, 398, 70);
-  Lbl.WrapText := True;
-  Lbl.Text :=
+  FLabel := TfpgLabel.Create(Self);
+  FLabel.SetPosition(16, 16, 398, 70);
+  FLabel.WrapText := True;
+  FLabel.Text :=
     'TermFpGUI is not yet in your applications menu.' + LineEnding + LineEnding +
     'Install a launcher (and icon) for the current user?  This also lets your '
     + 'desktop show the window icon on Wayland.';
@@ -283,34 +324,52 @@ begin FChoice := icLater; ModalResult := mrCancel; end;
 procedure TInstallPromptForm.NeverClick(Sender: TObject);
 begin FChoice := icNever; ModalResult := mrCancel; end;
 
-procedure MaybePromptInstall(AOwner: TfpgWidget; ACfg: TTermConfig);
+procedure TInstallPromptForm.SetPrompt(const AText: string);
+begin
+  FLabel.Text := AText;
+end;
+
+{ Show the three-way dialog with the given message and return the choice. }
+function AskInstall(const AText: string): TInstallChoice;
 var
   Frm: TInstallPromptForm;
-  Choice: TInstallChoice;
+begin
+  Frm := TInstallPromptForm.Create(nil);
+  try
+    Frm.SetPrompt(AText);
+    Frm.ShowModal;
+    Result := Frm.Choice;
+  finally
+    Frm.Free;
+  end;
+end;
+
+procedure ReportInstall(ASuccess: Boolean; const AError, AName: string);
+begin
+  if ASuccess then
+    TfpgMessageDialog.Information('Installed',
+      AName + ' was added to your applications menu.')
+  else
+    TfpgMessageDialog.Warning('Install failed',
+      'Could not install the launcher.' + LineEnding + AError);
+end;
+
+procedure MaybePromptInstall(AOwner: TfpgWidget; ACfg: TTermConfig);
+var
   ok: Boolean;
   err: string;
 begin
   if (ACfg <> nil) and ACfg.DesktopPromptDismissed then Exit;
   if DesktopInstalled then Exit;
 
-  Frm := TInstallPromptForm.Create(nil);
-  try
-    Frm.ShowModal;
-    Choice := Frm.Choice;
-  finally
-    Frm.Free;
-  end;
-
-  case Choice of
+  case AskInstall(
+    'TermFpGUI is not yet in your applications menu.' + LineEnding + LineEnding +
+    'Install a launcher (and icon) for the current user?  This also lets your '
+    + 'desktop show the window icon on Wayland.') of
     icInstall:
       begin
         ok := InstallDesktop(err);
-        if ok then
-          TfpgMessageDialog.Information('Installed',
-            'TermFpGUI was added to your applications menu.')
-        else
-          TfpgMessageDialog.Warning('Install failed',
-            'Could not install the launcher.' + LineEnding + err);
+        ReportInstall(ok, err, 'TermFpGUI');
       end;
     icNever:
       if ACfg <> nil then
@@ -319,6 +378,50 @@ begin
         ACfg.Save(DefaultConfigPath);
       end;
     icLater: ;   { ask again next launch }
+  end;
+end;
+
+{ Double-quote a path for a .desktop Exec= argument (per the spec, args with
+  spaces are double-quoted; backslash and quote are escaped). }
+function DQuoteExec(const S: string): string;
+begin
+  Result := StringReplace(S, '\', '\\', [rfReplaceAll]);
+  Result := StringReplace(Result, '"', '\"', [rfReplaceAll]);
+  Result := '"' + Result + '"';
+end;
+
+procedure MaybePromptInstallApp(AOwner: TfpgWidget; AApp: TTermAppConfig;
+  const AConfigPath: string; ACfg: TTermConfig);
+var
+  base, exec, iconsvg, err: string;
+  ok: Boolean;
+begin
+  if AApp = nil then Exit;
+  base := SanitizeBaseName(AApp.Name);
+  if base = '' then Exit;
+  if (ACfg <> nil) and ACfg.AppDesktopDismissed(base) then Exit;
+  if DesktopInstalledFor(base) then Exit;
+
+  case AskInstall(
+    'Add "' + AApp.Name + '" to your applications menu?' + LineEnding + LineEnding +
+    'This installs a launcher that starts this configuration' + LineEnding +
+    '(and its drawer), with its own name and icon.') of
+    icInstall:
+      begin
+        { The launcher re-runs this binary with the startup config. }
+        exec := DQuoteExec(BinaryPath) + ' --app '
+              + DQuoteExec(ExpandFileName(AConfigPath));
+        if AApp.IconSVG <> '' then iconsvg := AApp.IconSVG else iconsvg := CIconSVG;
+        ok := InstallEntry(base, AApp.Name, exec, iconsvg, err);
+        ReportInstall(ok, err, AApp.Name);
+      end;
+    icNever:
+      if ACfg <> nil then
+      begin
+        ACfg.DismissAppDesktop(base);
+        ACfg.Save(DefaultConfigPath);
+      end;
+    icLater: ;
   end;
 end;
 

@@ -88,7 +88,7 @@ var
   Win: TTermWindow;
   Cfg: TTermConfig;
   App: TTermAppConfig;
-  AppPath, MainCmd, WinTitle, RunCmd: string;
+  AppPath, MainCmd, WinTitle, RunCmd, AppErr: string;
   DD, OptMax: Integer;
 begin
   fpgApplication.Initialize;
@@ -113,18 +113,22 @@ begin
   if AppPath <> '' then
   begin
     App := TTermAppConfig.Create;
-    if App.Load(AppPath) then
+    if App.Load(AppPath, AppErr) then
     begin
       MainCmd := App.Command;
       WinTitle := App.Title;
       if App.Theme <> '' then Cfg.Theme := App.Theme;
+      Cfg.ActiveProfile := App.Name;        // the config's named profile
       Cfg.AddProfile(App.TakeProfile);      // Cfg now owns the profile
-      Cfg.ActiveProfile := 'App';
     end
     else
     begin
-      writeln('termfpgui: cannot read app config: ', AppPath);
-      FreeAndNil(App);
+      { name= is mandatory and the icon (if any) must be a valid SVG — refuse to
+        launch a malformed startup config rather than guessing. }
+      writeln('termfpgui: ', AppErr);
+      App.Free;
+      Cfg.Free;
+      Exit;
     end;
   end;
 
@@ -144,7 +148,7 @@ begin
     Win.Config := Cfg;                       // shared across torn-off windows
     if App <> nil then
     begin
-      Win.EnterAppMode;                      // hide the tab strip
+      Win.EnterAppMode(App, ExpandFileName(AppPath));  // hide tabs; enable launcher prompt
       if WinTitle <> '' then Win.WindowTitle := WinTitle;
     end;
     { First tab; the program (app command or login shell) starts on show. }

@@ -64,6 +64,9 @@ type
     FShown: Boolean;
     FAppMode: Boolean;             // single-program launch; tab strip hidden
     FTabStripH: Integer;           // height reserved for the tab strip (0 in app mode)
+    FAppConfig: TTermAppConfig;    // app-mode launch config (not owned), for the launcher prompt
+    FAppConfigPath: string;        // path the config was loaded from
+
     FFlashTimer: TfpgTimer;
     FFlashSaved: string;
     FLinkHoverSaved: string;       // window title stashed while hovering a link
@@ -133,8 +136,9 @@ type
     function AddTab(AController: TTerminalController; const ATitle: string;
                     AStartShell: Boolean; const AStartCmd: string = ''): TTermTab;
     { Single-program "app mode": hide the tab strip and give the content the full
-      window.  Call before AddTab. }
-    procedure EnterAppMode;
+      window.  Call before AddTab.  AApp/AConfigPath (when given) let the window
+      offer to install a launcher for this startup config. }
+    procedure EnterAppMode(AApp: TTermAppConfig = nil; const AConfigPath: string = '');
     { Free every window still open (called once the message loop has ended). }
     class procedure FreeAll;
     property Config: TTermConfig read FConfig write FConfig;
@@ -328,12 +332,18 @@ begin
   if (Tab <> nil) and (Tab.View <> nil) then
     Tab.View.SetFocus;
 
-  { Offer to add a desktop launcher the first time a normal window appears
-    (skipped in single-program app mode). }
-  if (not FAppMode) and (not FPromptDone) then
+  { Offer to add a desktop launcher the first time a window appears: the plain
+    app launcher for a normal window, or a per-config launcher in app mode. }
+  if not FPromptDone then
   begin
     FPromptDone := True;
-    MaybePromptInstall(Self, FConfig);
+    if FAppMode then
+    begin
+      if FAppConfig <> nil then
+        MaybePromptInstallApp(Self, FAppConfig, FAppConfigPath, FConfig);
+    end
+    else
+      MaybePromptInstall(Self, FConfig);
   end;
 end;
 
@@ -409,9 +419,11 @@ begin
   end;
 end;
 
-procedure TTermWindow.EnterAppMode;
+procedure TTermWindow.EnterAppMode(AApp: TTermAppConfig; const AConfigPath: string);
 begin
   FAppMode := True;
+  FAppConfig := AApp;
+  FAppConfigPath := AConfigPath;
   FTabStripH := 0;
   if FTabBar <> nil then
     FTabBar.Visible := False;

@@ -95,6 +95,7 @@ type
     FEmojiFont: string;
     FLinkOpenCommand: string;
     FDesktopPromptDismissed: Boolean;
+    FDesktopDismissedApps: string;   // ';'-delimited app basenames, dismissed
     function GetProfile(I: Integer): TTermProfile;
     function GetKey(I: Integer): TTermKeyBinding;
     function GetSignal(I: Integer): TTermSignalBinding;
@@ -140,6 +141,9 @@ type
     { Set once the user picks "Don't ask again" on the desktop-install prompt. }
     property DesktopPromptDismissed: Boolean read FDesktopPromptDismissed
       write FDesktopPromptDismissed;
+    { Per-app-launch "don't ask again" set, keyed by the launcher basename. }
+    function AppDesktopDismissed(const ABase: string): Boolean;
+    procedure DismissAppDesktop(const ABase: string);
   end;
 
   { An "app mode" launch config (loaded via --app <file>): runs a single program
@@ -151,13 +155,16 @@ type
   private
     FProfile: TTermProfile;
   public
-    Title: string;        // window title ('' = leave default)
+    Name: string;         // mandatory: launcher name + profile name + app_id base
+    Title: string;        // window title ('' = falls back to Name)
     Command: string;      // main program for the terminal ('' = login shell)
     Theme: string;        // fpGUI style override ('' = leave config's theme)
+    IconSVG: string;      // contents of the SVG icon ('' = default app icon)
     constructor Create;
     destructor Destroy; override;
-    { Read the [App] section.  Returns False if the file is missing. }
-    function Load(const APath: string): Boolean;
+    { Read the [App] section.  Returns False (with AError set) if the file is
+      missing, has no name=, or names an icon that is missing / not an SVG. }
+    function Load(const APath: string; out AError: string): Boolean;
     { Hand the profile to a caller that takes ownership (e.g. a TTermConfig);
       after this the app config no longer frees it. }
     function TakeProfile: TTermProfile;
@@ -443,6 +450,20 @@ begin
   FSignals.Delete(AIndex);
 end;
 
+function TTermConfig.AppDesktopDismissed(const ABase: string): Boolean;
+begin
+  Result := (ABase <> '') and
+            (Pos(';' + ABase + ';', ';' + FDesktopDismissedApps + ';') > 0);
+end;
+
+procedure TTermConfig.DismissAppDesktop(const ABase: string);
+begin
+  if (ABase = '') or AppDesktopDismissed(ABase) then Exit;
+  if FDesktopDismissedApps <> '' then
+    FDesktopDismissedApps := FDesktopDismissedApps + ';';
+  FDesktopDismissedApps := FDesktopDismissedApps + ABase;
+end;
+
 function TTermConfig.FindProfile(const AName: string): TTermProfile;
 var
   i: Integer;
@@ -497,6 +518,7 @@ begin
   FEmojiFont := '';
   FLinkOpenCommand := '';                { '' = view's built-in xdg-open }
   FDesktopPromptDismissed := False;
+  FDesktopDismissedApps := '';
 
   { ---- Profiles ---- }
   AddProfile(TTermProfile.Create('Default',        'Monospace-11', clWhite,            TfpgColor($000000)));
@@ -550,6 +572,7 @@ begin
     FEmojiFont := Ini.ReadString('General', 'emojifont', '');
     FLinkOpenCommand := Ini.ReadString('General', 'linkopencommand', '');
     FDesktopPromptDismissed := Ini.ReadBool('General', 'desktop_prompt_dismissed', False);
+    FDesktopDismissedApps := Ini.ReadString('General', 'desktop_dismissed_apps', '');
     Ini.ReadSections(Sections);
     for i := 0 to Sections.Count - 1 do
     begin
@@ -620,6 +643,7 @@ begin
     Ini.WriteString('General', 'emojifont', FEmojiFont);
     Ini.WriteString('General', 'linkopencommand', FLinkOpenCommand);
     Ini.WriteBool('General', 'desktop_prompt_dismissed', FDesktopPromptDismissed);
+    Ini.WriteString('General', 'desktop_dismissed_apps', FDesktopDismissedApps);
     for i := 0 to FProfiles.Count - 1 do
     begin
       Sec := 'Profile.' + GetProfile(i).Name;
@@ -682,23 +706,65 @@ begin
   inherited Destroy;
 end;
 
-function TTermAppConfig.Load(const APath: string): Boolean;
+function TTermAppConfig.Load(const APath: string; out AError: string): Boolean;
 var
   Ini: TIniFile;
+  iconRef, iconPath, body: string;
+  svg: TStringList;
 begin
-  Result := FileExists(APath);
-  if not Result then Exit;
+  Result := False;
+  AError := '';
+  if not FileExists(APath) then
+  begin
+    AError := 'file not found: ' + APath;
+    Exit;
+  end;
   Ini := TIniFile.Create(APath);
   try
-    Title   := Ini.ReadString('App', 'title', '');
+    { name= is the label for this startup config — mandatory. }
+    Name := Trim(Ini.ReadString('App', 'name', ''));
+    if Name = '' then
+    begin
+      AError := 'the [App] section must define name= (a label for this config)';
+      Exit;
+    end;
+    Title   := Ini.ReadString('App', 'title', Name);
     Command := Ini.ReadString('App', 'command', '');
     Theme   := Ini.ReadString('App', 'theme', '');
     { Same keys a profile uses, read straight into the app's profile. }
     ReadProfileFields(Ini, 'App', FProfile);
-    FProfile.Name := Ini.ReadString('App', 'profile_name', 'App');
+    FProfile.Name := Name;
+
+    { Optional icon: must be an SVG.  Resolved relative to the config file. }
+    iconRef := Trim(Ini.ReadString('App', 'icon', ''));
+    if iconRef <> '' then
+    begin
+      iconPath := iconRef;
+      if not FileExists(iconPath) then
+        iconPath := ExtractFilePath(ExpandFileName(APath)) + iconRef;
+      if not FileExists(iconPath) then
+      begin
+        AError := 'icon not found: ' + iconRef;
+        Exit;
+      end;
+      svg := TStringList.Create;
+      try
+        svg.LoadFromFile(iconPath);
+        body := svg.Text;
+      finally
+        svg.Free;
+      end;
+      if Pos('<svg', LowerCase(body)) = 0 then
+      begin
+        AError := 'icon must be an SVG file: ' + iconRef;
+        Exit;
+      end;
+      IconSVG := body;
+    end;
   finally
     Ini.Free;
   end;
+  Result := True;
 end;
 
 function TTermAppConfig.TakeProfile: TTermProfile;
