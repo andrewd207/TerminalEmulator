@@ -24,6 +24,7 @@ uses
   fpg_style_motif, fpg_style_plastic, fpg_style_fusion,
   fpg_style_win2k, fpg_style_win8,
   TermFpGUI.Config,
+  TermFpGUI.Desktop,
   TermFpGUI.Window;
 
 { 1-based index of the first bare "--" separator, or 0 if there is none.
@@ -91,6 +92,7 @@ var
   DD, OptMax: Integer;
 begin
   fpgApplication.Initialize;
+  RegisterAppIcon;                          // window icon (before any form)
   Cfg := TTermConfig.Create;
   Cfg.Load(DefaultConfigPath);              // seeds defaults if no file yet
 

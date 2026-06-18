@@ -25,7 +25,7 @@ uses
   fpg_button, fpg_dialogs, fpg_label, fpg_edit, fpg_combobox, fpg_panel,
   fpg_checkbox,
   Terminal.View.fpGUI,                 { TTermViewEdge }
-  TermFpGUI.Config, TermFpGUI.Actions;
+  TermFpGUI.Config, TermFpGUI.Actions, TermFpGUI.Desktop;
 
 type
   TTermSettingsForm = class(TfpgForm)
@@ -49,6 +49,7 @@ type
     procedure AddSignalClick(Sender: TObject);
     procedure RemoveSignalClick(Sender: TObject);
     procedure RemoveKeyClick(Sender: TObject);
+    procedure InstallDesktopClick(Sender: TObject);
     procedure SaveCloseClick(Sender: TObject);
   public
     constructor CreateFor(AOwner: TComponent; AConfig: TTermConfig; const APath: string);
@@ -752,6 +753,14 @@ begin
   Btn.SetPosition(110, GRID_H - 26, 100, 26);
   Btn.OnClick := @RemoveSignalClick;
 
+  { Desktop-launcher install, form-level (always available — the startup prompt
+    can be permanently dismissed, so this is the way back in). }
+  Btn := TfpgButton.Create(Self);
+  if DesktopInstalled then Btn.Text := 'Reinstall Launcher'
+  else Btn.Text := 'Add to Applications Menu';
+  Btn.SetPosition(6, FORM_H - 38, 200, 26);
+  Btn.OnClick := @InstallDesktopClick;
+
   { Save & Close is form-level, shown on every tab. }
   Btn := TfpgButton.Create(Self);
   Btn.Text := 'Save & Close';
@@ -967,6 +976,26 @@ begin
   if FKeysGrid.FocusRow < 0 then Exit;
   FConfig.RemoveKey(FKeysGrid.FocusRow);
   RefreshKeys;
+end;
+
+{ Install (or reinstall) the per-user .desktop launcher + icon on demand, even
+  if the startup prompt was permanently dismissed.  Clears the dismissed flag so
+  the (now-installed) state is consistent. }
+procedure TTermSettingsForm.InstallDesktopClick(Sender: TObject);
+var
+  err: string;
+begin
+  if InstallDesktop(err) then
+  begin
+    FConfig.DesktopPromptDismissed := False;
+    TfpgMessageDialog.Information('Launcher',
+      'TermFpGUI was added to your applications menu.');
+    if Sender is TfpgButton then
+      TfpgButton(Sender).Text := 'Reinstall Launcher';
+  end
+  else
+    TfpgMessageDialog.Warning('Launcher',
+      'Could not install the launcher.' + LineEnding + err);
 end;
 
 procedure TTermSettingsForm.SaveCloseClick(Sender: TObject);

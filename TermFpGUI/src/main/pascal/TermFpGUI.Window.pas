@@ -30,7 +30,8 @@ uses
   fpg_base, fpg_main, fpg_form, fpg_menu, fpg_dialogs, fpg_panel,
   fpg_stylemanager,
   Terminal.Controller, Terminal.Core, Terminal.Parser, Terminal.View.fpGUI,
-  TermFpGUI.Actions, TermFpGUI.Config, TermFpGUI.TabBar, TermFpGUI.Drawer;
+  TermFpGUI.Actions, TermFpGUI.Config, TermFpGUI.TabBar, TermFpGUI.Drawer,
+  TermFpGUI.Desktop;
 
 type
   { One terminal session living in one tab.  Parallel-indexed with FTabBar. }
@@ -48,6 +49,8 @@ type
     { Every live TTermWindow (main + torn-off), so the app stays up until the
       last one closes and MainProc can free whatever remains. }
     FWindows: TFPList;
+    { The desktop-install prompt is offered at most once per app run. }
+    FPromptDone: Boolean;
   private
     FConfig: TTermConfig;          // shared, not owned
     FTabBar: TTermTabBar;
@@ -324,6 +327,14 @@ begin
   Tab := ActiveTab;
   if (Tab <> nil) and (Tab.View <> nil) then
     Tab.View.SetFocus;
+
+  { Offer to add a desktop launcher the first time a normal window appears
+    (skipped in single-program app mode). }
+  if (not FAppMode) and (not FPromptDone) then
+  begin
+    FPromptDone := True;
+    MaybePromptInstall(Self, FConfig);
+  end;
 end;
 
 function TTermWindow.AddTab(AController: TTerminalController;

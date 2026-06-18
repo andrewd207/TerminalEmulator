@@ -94,6 +94,7 @@ type
     FFont: string;
     FEmojiFont: string;
     FLinkOpenCommand: string;
+    FDesktopPromptDismissed: Boolean;
     function GetProfile(I: Integer): TTermProfile;
     function GetKey(I: Integer): TTermKeyBinding;
     function GetSignal(I: Integer): TTermSignalBinding;
@@ -136,6 +137,9 @@ type
     { Custom opener for OSC 8 hyperlinks; '%u' is replaced with the URI.
       Empty = let the view fall back to its built-in xdg-open. }
     property LinkOpenCommand: string read FLinkOpenCommand write FLinkOpenCommand;
+    { Set once the user picks "Don't ask again" on the desktop-install prompt. }
+    property DesktopPromptDismissed: Boolean read FDesktopPromptDismissed
+      write FDesktopPromptDismissed;
   end;
 
   { An "app mode" launch config (loaded via --app <file>): runs a single program
@@ -492,6 +496,7 @@ begin
   FFont := '';
   FEmojiFont := '';
   FLinkOpenCommand := '';                { '' = view's built-in xdg-open }
+  FDesktopPromptDismissed := False;
 
   { ---- Profiles ---- }
   AddProfile(TTermProfile.Create('Default',        'Monospace-11', clWhite,            TfpgColor($000000)));
@@ -544,6 +549,7 @@ begin
     FFont := Ini.ReadString('General', 'font', '');
     FEmojiFont := Ini.ReadString('General', 'emojifont', '');
     FLinkOpenCommand := Ini.ReadString('General', 'linkopencommand', '');
+    FDesktopPromptDismissed := Ini.ReadBool('General', 'desktop_prompt_dismissed', False);
     Ini.ReadSections(Sections);
     for i := 0 to Sections.Count - 1 do
     begin
@@ -613,6 +619,7 @@ begin
     Ini.WriteString('General', 'font', FFont);
     Ini.WriteString('General', 'emojifont', FEmojiFont);
     Ini.WriteString('General', 'linkopencommand', FLinkOpenCommand);
+    Ini.WriteBool('General', 'desktop_prompt_dismissed', FDesktopPromptDismissed);
     for i := 0 to FProfiles.Count - 1 do
     begin
       Sec := 'Profile.' + GetProfile(i).Name;
