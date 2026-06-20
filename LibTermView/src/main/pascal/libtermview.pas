@@ -251,6 +251,40 @@ begin
   if h^.Ctrl.StartShell(S, []) then Result := 1 else Result := 0;
 end;
 
+{ Run an arbitrary command line in the PTY (via /bin/sh -c) instead of a login
+  shell.  Empty cmd falls back to a shell.  Returns 1 on success. }
+function tv_start_command(h: PTvHandle; cmd: PAnsiChar): cint; cdecl;
+var S: string;
+begin
+  if h = nil then Exit(0);
+  if cmd = nil then S := '' else S := StrPas(cmd);
+  if Trim(S) = '' then
+  begin
+    if h^.Ctrl.StartShell('', []) then Result := 1 else Result := 0;
+    Exit;
+  end;
+  if h^.Ctrl.StartCommand('/bin/sh', ['-c', S]) then Result := 1 else Result := 0;
+end;
+
+{ Deliver a signal to the hosted child immediately. }
+procedure tv_send_signal(h: PTvHandle; sig: cint); cdecl;
+begin
+  if h <> nil then h^.Ctrl.SendSignal(sig);
+end;
+
+{ Signal sent to the child on teardown (default 15=SIGTERM; 0 = none, let the
+  PTY close deliver SIGHUP). }
+procedure tv_set_shutdown_signal(h: PTvHandle; sig: cint); cdecl;
+begin
+  if h <> nil then h^.Ctrl.ShutdownSignal := sig;
+end;
+
+function tv_get_shutdown_signal(h: PTvHandle): cint; cdecl;
+begin
+  if h = nil then Exit(0);
+  Result := h^.Ctrl.ShutdownSignal;
+end;
+
 function tv_pump(h: PTvHandle): cint; cdecl;
 begin
   if h = nil then Exit(0);
@@ -448,7 +482,8 @@ begin if h <> nil then h^.OnClipGet := cb; end;
 
 exports
   tv_controller_new, tv_controller_free,
-  tv_start_shell, tv_pump,
+  tv_start_shell, tv_start_command, tv_pump,
+  tv_send_signal, tv_set_shutdown_signal, tv_get_shutdown_signal,
   tv_send_input, tv_send_mouse,
   tv_resize,
   tv_cols, tv_rows, tv_history_count,

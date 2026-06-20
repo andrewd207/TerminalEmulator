@@ -79,6 +79,18 @@ void       tv_controller_free(tv_handle *h);
 
 int        tv_start_shell(tv_handle *h, const char *shell /* or NULL */);
 
+/* Run an arbitrary command line in the PTY (via /bin/sh -c) instead of a login
+ * shell. NULL/empty falls back to a shell. Returns 1 on success. */
+int        tv_start_command(tv_handle *h, const char *cmd);
+
+/* Send a signal to the hosted child immediately. */
+void       tv_send_signal(tv_handle *h, int sig);
+
+/* Signal sent to the child on teardown (default 15=SIGTERM; 0 = none, so
+ * closing the PTY delivers SIGHUP/EOF naturally). */
+void       tv_set_shutdown_signal(tv_handle *h, int sig);
+int        tv_get_shutdown_signal(tv_handle *h);
+
 /* Pull bytes from the PTY into the parser. Returns bytes read this tick.
  * Call from your main-loop timer (≈20ms). */
 int        tv_pump(tv_handle *h);

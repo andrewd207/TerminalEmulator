@@ -31,6 +31,20 @@ type
   TTermLinkClickEvent = procedure(Sender: TObject; ALinkId: Integer;
     const AURI: string; var AHandled: Boolean) of object;
 
+  { An app keymap hook: fired before the view's built-in key handling.  Set
+    AHandled := True to consume the chord (the matching character is swallowed
+    too). }
+  TTermViewKeyEvent = procedure(Sender: TObject; AKeyCode: Word;
+    AShift: TShiftState; var AHandled: Boolean) of object;
+
+  { Which edge the pointer is hovering near (for docked overlays / drawers). }
+  TTermViewEdge = (veNone, veLeft, veRight, veTop, veBottom);
+  TTermEdgeEvent = procedure(Sender: TObject; AEdge: TTermViewEdge) of object;
+
+  { A consumable left-click on the view body.  Set AHandled := True to eat it
+    (e.g. click-away to dismiss an overlay). }
+  TTermViewClickEvent = procedure(Sender: TObject; var AHandled: Boolean) of object;
+
   { TTerminalLCLView }
 
   TTerminalLCLView = class(TCustomControl)
@@ -62,6 +76,12 @@ type
     FOnLinkHover: TTermLinkEvent;
     FOnLinkLeave: TTermLinkEvent;
     FOnLinkClick: TTermLinkClickEvent;
+    FOnKeyAction: TTermViewKeyEvent;
+    FSuppressNextChar: Boolean;   { eat the char a consumed chord would type }
+    FOnEdgeHover: TTermEdgeEvent;
+    FLastEdge: TTermViewEdge;
+    FOnViewClick: TTermViewClickEvent;
+    FReservedX1, FReservedY1, FReservedX2, FReservedY2: Integer;
     FYieldRightClickToApp: Boolean;
     FLastMouseReportCol: Integer;
     FLastMouseReportRow: Integer;
@@ -112,6 +132,8 @@ type
     function PixelToCell(X, Y: Integer): TTermCellPos;
     function TryMouseReport(X, Y: Integer; Shift: TShiftState;
       AButton: TTermMouseButton; APressed, AMotion: Boolean): Boolean;
+    function EdgeAt(X, Y: Integer): TTermViewEdge;
+    function RectInReserved(const R: TRect): Boolean;
     procedure UpdateScrollBar;
     procedure CreatePopupMenu;
     procedure DoCopy;
@@ -136,8 +158,21 @@ type
     procedure AttachController(AController: TTerminalController);
     procedure DetachController;
     procedure StartShell(const AShell: string = '');
+    { Run an arbitrary command line in the PTY (via /bin/sh -c).  Empty falls
+      back to a login shell. }
+    procedure StartProgram(const ACmdLine: string);
     procedure ScrollBy(ADeltaRows: Integer); reintroduce;
     procedure WriteExitBanner;
+    { Leave a rectangle (control coords) unpainted so a docked overlay drawn on
+      top isn't clobbered.  Pass a degenerate rect / ClearReservedRect to release. }
+    procedure SetReservedRect(AX1, AY1, AX2, AY2: Integer);
+    procedure ClearReservedRect;
+    { Snapshot an AW x AH region of the rendered grid starting at (AX,AY) into a
+      fresh TBitmap (caller frees).  Used for overlay reveal animations. }
+    function CaptureRegion(AX, AY, AW, AH: Integer): TBitmap;
+    { Ensure metrics + a window handle exist so CaptureRegion has content even
+      before the view has first been shown. }
+    procedure EnsureRendered;
 
     property Controller: TTerminalController read FController;
     property FontName: string read FFontName write FFontName;
@@ -161,6 +196,12 @@ type
     property OnLinkHover: TTermLinkEvent read FOnLinkHover write FOnLinkHover;
     property OnLinkLeave: TTermLinkEvent read FOnLinkLeave write FOnLinkLeave;
     property OnLinkClick: TTermLinkClickEvent read FOnLinkClick write FOnLinkClick;
+    { Fired before built-in key handling; consume to bind app shortcuts. }
+    property OnKeyAction: TTermViewKeyEvent read FOnKeyAction write FOnKeyAction;
+    { Fired when the pointer enters/leaves a window edge (veNone on leave). }
+    property OnEdgeHover: TTermEdgeEvent read FOnEdgeHover write FOnEdgeHover;
+    { Fired on a left-click on the body; consume to eat it. }
+    property OnViewClick: TTermViewClickEvent read FOnViewClick write FOnViewClick;
   published
     property Align;
     property Anchors;
@@ -188,6 +229,7 @@ const
   CURSOR_BLINK_MS = 750;
   PUMP_MS = 20;
   SELECTION_DRAG_THRESHOLD = 3;
+  EDGE_HOVER_PX = 6;            { pointer proximity that arms a docked drawer }
 
 function RGBToLCLColor(ARGB: Cardinal): TColor; inline;
 begin
@@ -290,6 +332,87 @@ begin
     SyncSizeToController;
     FController.StartShell(AShell, []);
     SyncSizeToController;
+  end;
+end;
+
+procedure TTerminalLCLView.StartProgram(const ACmdLine: string);
+begin
+  if FController = nil then Exit;
+  if Trim(ACmdLine) = '' then
+  begin
+    StartShell;
+    Exit;
+  end;
+  SyncSizeToController;
+  { Through the shell so a full command line (args, pipes, env) still gets a
+    PTY-backed child. }
+  FController.StartCommand('/bin/sh', ['-c', ACmdLine]);
+  SyncSizeToController;
+end;
+
+function TTerminalLCLView.EdgeAt(X, Y: Integer): TTermViewEdge;
+var
+  W, H: Integer;
+begin
+  Result := veNone;
+  W := ClientWidth;
+  H := ClientHeight;
+  if (X < 0) or (Y < 0) or (X >= W) or (Y >= H) then Exit;
+  if X <= EDGE_HOVER_PX then Result := veLeft
+  else if X >= W - 1 - EDGE_HOVER_PX then Result := veRight
+  else if Y <= EDGE_HOVER_PX then Result := veTop
+  else if Y >= H - 1 - EDGE_HOVER_PX then Result := veBottom;
+end;
+
+function TTerminalLCLView.RectInReserved(const R: TRect): Boolean;
+begin
+  Result := (FReservedX2 > FReservedX1) and (FReservedY2 > FReservedY1)
+    and (R.Left >= FReservedX1) and (R.Top >= FReservedY1)
+    and (R.Right <= FReservedX2) and (R.Bottom <= FReservedY2);
+end;
+
+procedure TTerminalLCLView.SetReservedRect(AX1, AY1, AX2, AY2: Integer);
+begin
+  if (AX1 = FReservedX1) and (AY1 = FReservedY1)
+     and (AX2 = FReservedX2) and (AY2 = FReservedY2) then Exit;
+  FReservedX1 := AX1; FReservedY1 := AY1;
+  FReservedX2 := AX2; FReservedY2 := AY2;
+  Invalidate;
+end;
+
+procedure TTerminalLCLView.ClearReservedRect;
+begin
+  SetReservedRect(0, 0, 0, 0);
+end;
+
+procedure TTerminalLCLView.EnsureRendered;
+begin
+  if FController = nil then Exit;
+  UpdateMetrics;
+  HandleNeeded;
+end;
+
+function TTerminalLCLView.CaptureRegion(AX, AY, AW, AH: Integer): TBitmap;
+var
+  full: TBitmap;
+begin
+  if AW < 1 then AW := 1;
+  if AH < 1 then AH := 1;
+  Result := TBitmap.Create;
+  Result.SetSize(AW, AH);
+  full := TBitmap.Create;
+  try
+    full.SetSize(Max(1, Width), Max(1, Height));
+    full.Canvas.Brush.Style := bsSolid;
+    full.Canvas.Brush.Color := FBackgroundColor;
+    full.Canvas.FillRect(0, 0, full.Width, full.Height);
+    HandleNeeded;
+    { Render this control (its Paint) into the offscreen bitmap, then crop. }
+    PaintTo(full.Canvas, 0, 0);
+    Result.Canvas.CopyRect(Rect(0, 0, AW, AH), full.Canvas,
+      Rect(AX, AY, AX + AW, AY + AH));
+  finally
+    full.Free;
   end;
 end;
 
@@ -1038,6 +1161,9 @@ begin
     if Length(Line) = 0 then Continue;
     for Col := 0 to Min(High(Line), ColsVisible - 1) do
     begin
+      { Skip cells fully under a reserved overlay region so it isn't clobbered. }
+      if (FReservedX2 > FReservedX1) and RectInReserved(CellRect(Col, Row)) then
+        Continue;
       HostsCursor := FController.Core.Cursor.Visible
                  and (FCursorStyle = csBlock)
                  and (FController.Core.Cursor.Col = Col)
@@ -1124,9 +1250,26 @@ begin
 end;
 
 procedure TTerminalLCLView.KeyDown(var Key: Word; Shift: TShiftState);
+var
+  LHandled: Boolean;
 begin
   inherited KeyDown(Key, Shift);
   if FController = nil then Exit;
+
+  FSuppressNextChar := False;
+  { App keybindings get first refusal.  If consumed, swallow the matching char
+    too (UTF8KeyPress checks FSuppressNextChar). }
+  if Assigned(FOnKeyAction) then
+  begin
+    LHandled := False;
+    FOnKeyAction(Self, Key, Shift, LHandled);
+    if LHandled then
+    begin
+      Key := 0;
+      FSuppressNextChar := True;
+      Exit;
+    end;
+  end;
 
   { Shift+Insert is the unconditional paste escape hatch — check before
     routing Insert to the PTY. Ctrl+Shift+V is handled further down. }
@@ -1213,6 +1356,13 @@ procedure TTerminalLCLView.UTF8KeyPress(var UTF8Key: TUTF8Char);
 begin
   inherited UTF8KeyPress(UTF8Key);
   if FController = nil then Exit;
+  { A key just consumed by OnKeyAction must not also be typed into the PTY. }
+  if FSuppressNextChar then
+  begin
+    FSuppressNextChar := False;
+    UTF8Key := '';
+    Exit;
+  end;
   if UTF8Key = '' then Exit;
   if (Length(UTF8Key) = 1) and (UTF8Key[1] < #32) then Exit;
   FController.SendInput(RawByteString(UTF8Key));
@@ -1257,6 +1407,7 @@ procedure TTerminalLCLView.MouseDown(Button: TMouseButton; Shift: TShiftState; X
 var
   HadSelection: Boolean;
   TermBtn: TTermMouseButton;
+  ClickHandled: Boolean;
 begin
   inherited MouseDown(Button, Shift, X, Y);
   if CanFocus and (not Focused) then SetFocus;
@@ -1285,6 +1436,15 @@ begin
 
   if Button <> mbLeft then Exit;
 
+  { Consumable click (e.g. click-away to dismiss an overlay).  Eats the click —
+    no selection starts. }
+  if Assigned(FOnViewClick) then
+  begin
+    ClickHandled := False;
+    FOnViewClick(Self, ClickHandled);
+    if ClickHandled then Exit;
+  end;
+
   HadSelection := FSelection.Active;
   FSelection.Active := False;
   FSelection.Selecting := False;
@@ -1300,8 +1460,20 @@ var
   Cell: TTermCellPos;
   Btn: TTermMouseButton;
   HasButton: Boolean;
+  NewEdge: TTermViewEdge;
 begin
   inherited MouseMove(Shift, X, Y);
+
+  { Edge proximity for a docked overlay/drawer (only on button-less motion). }
+  if Assigned(FOnEdgeHover) and ((Shift * [ssLeft, ssMiddle, ssRight]) = []) then
+  begin
+    NewEdge := EdgeAt(X, Y);
+    if NewEdge <> FLastEdge then
+    begin
+      FLastEdge := NewEdge;
+      FOnEdgeHover(Self, NewEdge);
+    end;
+  end;
 
   { Hyperlink hover is a non-destructive visual highlight (hand cursor + solid
     underline, dirty-line repaint).  Do it on every button-less motion REGARDLESS
@@ -1404,6 +1576,11 @@ begin
   { Pointer left the control — drop any hover so the solid line reverts to
     dotted and the hand cursor clears. }
   SetHoverLink(0);
+  if (FLastEdge <> veNone) and Assigned(FOnEdgeHover) then
+  begin
+    FLastEdge := veNone;
+    FOnEdgeHover(Self, veNone);
+  end;
 end;
 
 function TTerminalLCLView.DoMouseWheel(Shift: TShiftState; WheelDelta: Integer;
