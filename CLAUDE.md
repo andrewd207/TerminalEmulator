@@ -59,6 +59,7 @@ Composes Core + Parser + Backend. This is the primary public API for embedders:
 - `Pump` — call on a timer; reads PTY output, feeds it to the parser, returns bytes read
 - `Resize(cols, rows)` — updates both Core and Backend (sends `TIOCSWINSZ`)
 - `SendInput` / `SendKeyEnter` / `SendArrowUp` etc. — writes input to the PTY
+- `SendSignal(sig)` delivers a signal to the child now; `ShutdownSignal` is the signal sent on teardown (default `SIGTERM` 15; `0` = skip the kill and let closing the PTY deliver `SIGHUP`/EOF)
 - `Core.OnWrite` is wired to `Backend.WriteInput` so parser reply sequences (CPR, DA) go back to the PTY automatically
 
 ### Terminal.Backend.Base / Terminal.Backend.Unix / Terminal.Backend.Windows
@@ -72,12 +73,22 @@ fpGUI widget `TTerminalFPGUIView` (subclass of `TfpgWidget`). Renders the termin
 - Two timers: `FTimer` (20 ms) calls `Pump` and repaints if bytes arrived; `FCursorTimer` (750 ms) toggles cursor blink.
 - Controller is attached/detached explicitly (`AttachController`/`DetachController`); the view does not own the controller.
 - `TTerminalFPGUIForm` is a convenience form wrapping the view.
+- Overlay / keymap hooks used by the drawer (mirrored on the LCL view, `Terminal.View.LCL.pas`): `StartProgram` (run a command line), `OnKeyAction` (consume a chord before built-in handling; the matching char is then swallowed), `OnEdgeHover` / `OnViewClick`, `SetReservedRect`/`ClearReservedRect` (leave a region unpainted so an overlay isn't clobbered), `CaptureRegion` / `EnsureRendered` (snapshot the grid for reveal animations). On fpGUI these back the in-window direct-blit drawer; the LCL view exposes the same API surface (`CaptureRegion` returns a `TBitmap`). The C ABI (`LibTermView`) adds `tv_start_command` / `tv_send_signal` / `tv_set_shutdown_signal`.
 
 ### Terminal.Unicode (`Terminal.Unicode.pas`)
 UTF-8 decode/encode helpers and terminal cell-width calculation (`CodePointCellWidth`): returns 0 for combining/zero-width, 2 for wide (East Asian fullwidth/wide, most emoji), 1 otherwise. Uses sorted interval tables with binary search.
 
 ### Terminal.Core.Ringbuffer (`Terminal.Core.Ringbuffer.pas`)
 Generic `TRingBuffer<T: class>`. Fixed capacity, optional `OwnsObjects` (frees evicted items), optional `OverwriteWhenFull` (drops oldest). Indexed by logical position 0..Count-1. Used for scrollback history.
+
+### TermFpGUI app (`TermFpGUI/src/main/pascal/TermFpGUI.*.pas`)
+The full fpGUI application (`ExampleTerminal` is the minimal reference). Units:
+- `TermFpGUI.Window` — `TTermWindow` (tabbed form): tabs, hamburger/tab menus, profile + theme application, deferred tab teardown (`QueueDispose`/`DisposeTick` — never free a view from inside its own timer callback), multi-window lifetime (`FWindows` class list, `FreeAll`), and `EnterAppMode` (single-program, tab strip hidden).
+- `TermFpGUI.Drawer` — `TTermDrawer`, the per-tab hover side panel: own controller+view, reveal animations (fade/assemble/none) composited as opaque images and direct-blitted, gravity/size/colour-profile, and the shutdown policy (`ApplyShutdownPolicy` sets `Controller.ShutdownSignal` / sends keys before teardown).
+- `TermFpGUI.Config` — INI model: `TTermProfile` (appearance + all `drawer_*` keys including shutdown), `TTermConfig` (profiles, key/signal bindings, theme), and `TTermAppConfig` (`[App]` launch config; `name=` mandatory, optional SVG `icon=`). `ReadProfileFields` is shared between profile and app-config parsing.
+- `TermFpGUI.Desktop` — embedded HVIF window icon (`{$I termfpgui_icon.inc}`, generated from `icons/termfpgui.svg` by the fpgui `svg2hvif` tool) and XDG `.desktop` install (`MaybePromptInstall` for the app, `MaybePromptInstallApp` for a per-config launcher; `InstallEntry` writes the `.desktop` + scalable SVG).
+- `TermFpGUI.SettingsForm` / `TermFpGUI.Actions` / `TermFpGUI.TabBar` — settings dialog, action model, tab strip.
+- CLI: `--app <ini>` (app mode), trailing `--` passes the rest as the command; both handled in `TermFpGUI.pas` `MainProc`.
 
 ## Key Conventions
 
