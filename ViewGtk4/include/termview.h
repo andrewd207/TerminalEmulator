@@ -91,6 +91,10 @@ void       tv_send_signal(tv_handle *h, int sig);
 void       tv_set_shutdown_signal(tv_handle *h, int sig);
 int        tv_get_shutdown_signal(tv_handle *h);
 
+/* The hosted child's exit status once reaped (exit code, or 128+signal if
+ * killed); -1 until it has exited. */
+int        tv_exit_code(tv_handle *h);
+
 /* Pull bytes from the PTY into the parser. Returns bytes read this tick.
  * Call from your main-loop timer (≈20ms). */
 int        tv_pump(tv_handle *h);

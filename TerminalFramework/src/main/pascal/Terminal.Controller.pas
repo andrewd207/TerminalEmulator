@@ -54,6 +54,7 @@ type
     procedure SendSignal(ASignal: Integer);
     function GetShutdownSignal: Integer;
     procedure SetShutdownSignal(AValue: Integer);
+    function GetChildExitCode: Integer;
 
     property Core: TTerminalCore read FCore;
     property Parser: TTerminalParser read FParser;
@@ -61,6 +62,9 @@ type
     { Signal delivered to the child when the controller/backend is torn down.
       Defaults to SIGTERM; 0 = close the PTY without an explicit kill. }
     property ShutdownSignal: Integer read GetShutdownSignal write SetShutdownSignal;
+    { The hosted child's exit status once reaped (exit code, or 128+signal if
+      killed); -1 until it has exited. }
+    property ChildExitCode: Integer read GetChildExitCode;
   end;
 
 implementation
@@ -213,6 +217,11 @@ procedure TTerminalController.SetShutdownSignal(AValue: Integer);
 begin
   if FBackend <> nil then
     FBackend.ShutdownSignal := AValue;
+end;
+
+function TTerminalController.GetChildExitCode: Integer;
+begin
+  if FBackend <> nil then Result := FBackend.ExitCode else Result := -1;
 end;
 
 end.

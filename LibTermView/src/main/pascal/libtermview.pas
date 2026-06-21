@@ -263,7 +263,8 @@ begin
     if h^.Ctrl.StartShell('', []) then Result := 1 else Result := 0;
     Exit;
   end;
-  if h^.Ctrl.StartCommand('/bin/sh', ['-c', S]) then Result := 1 else Result := 0;
+  { argv MUST include argv[0] — else sh is exec'd with argv[0]='-c' and fails. }
+  if h^.Ctrl.StartCommand('/bin/sh', ['/bin/sh', '-c', S]) then Result := 1 else Result := 0;
 end;
 
 { Deliver a signal to the hosted child immediately. }
@@ -283,6 +284,14 @@ function tv_get_shutdown_signal(h: PTvHandle): cint; cdecl;
 begin
   if h = nil then Exit(0);
   Result := h^.Ctrl.ShutdownSignal;
+end;
+
+{ The hosted child's exit status once reaped (exit code, or 128+signal if
+  killed); -1 until it has exited. }
+function tv_exit_code(h: PTvHandle): cint; cdecl;
+begin
+  if h = nil then Exit(-1);
+  Result := h^.Ctrl.ChildExitCode;
 end;
 
 function tv_pump(h: PTvHandle): cint; cdecl;
@@ -483,7 +492,7 @@ begin if h <> nil then h^.OnClipGet := cb; end;
 exports
   tv_controller_new, tv_controller_free,
   tv_start_shell, tv_start_command, tv_pump,
-  tv_send_signal, tv_set_shutdown_signal, tv_get_shutdown_signal,
+  tv_send_signal, tv_set_shutdown_signal, tv_get_shutdown_signal, tv_exit_code,
   tv_send_input, tv_send_mouse,
   tv_resize,
   tv_cols, tv_rows, tv_history_count,

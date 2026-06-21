@@ -51,6 +51,10 @@ type
     FWindows: TFPList;
     { The desktop-install prompt is offered at most once per app run. }
     FPromptDone: Boolean;
+    { App mode: set when the hosted program's own exit ended the app, with its
+      exit code — relayed by MainProc as the process exit status. }
+    FAppExited: Boolean;
+    FAppExitCode: Integer;
   private
     FConfig: TTermConfig;          // shared, not owned
     FTabBar: TTermTabBar;
@@ -76,6 +80,8 @@ type
       (and its timer) from within its own timer fire is a use-after-free. }
     FDisposeTimer: TfpgTimer;
     FPendingDispose: TFPList;      // of TTermTab awaiting deferred disposal
+    FPromptTimer: TfpgTimer;       // one-shot: runs the install prompt off OnShow
+    procedure PromptTick(Sender: TObject);
     procedure QueueDispose(ATab: TTermTab);
     procedure DisposeTick(Sender: TObject);
     procedure BuildTabMenu;
@@ -141,6 +147,10 @@ type
     procedure EnterAppMode(AApp: TTermAppConfig = nil; const AConfigPath: string = '');
     { Free every window still open (called once the message loop has ended). }
     class procedure FreeAll;
+    { True when a hosted program's own exit ended the app (app mode); its exit
+      code is then in AppProgramExitCode.  Used by MainProc to relay it. }
+    class function AppProgramExited: Boolean;
+    class function AppProgramExitCode: Integer;
     property Config: TTermConfig read FConfig write FConfig;
   end;
 
@@ -198,6 +208,13 @@ begin
   FDisposeTimer := TfpgTimer.Create(1);   // one-shot; disabled inside its handler
   FDisposeTimer.OnTimer := @DisposeTick;
   FDisposeTimer.Enabled := False;
+
+  { One-shot: runs the desktop-install prompt after the window is fully shown,
+    not from inside the OnShow handler (a modal dialog nested in OnShow crashes
+    fpGUI). }
+  FPromptTimer := TfpgTimer.Create(1);
+  FPromptTimer.OnTimer := @PromptTick;
+  FPromptTimer.Enabled := False;
 
   OnShow := @FormShow;
   { Before the close commits, if this is the app's main form and other windows
@@ -283,6 +300,7 @@ begin
     FWindows.Remove(Self);
   FreeAndNil(FFlashTimer);
   FreeAndNil(FDisposeTimer);          { stop deferred disposal before teardown }
+  FreeAndNil(FPromptTimer);
   FreeAndNil(FPendingDispose);
   if FTabs <> nil then
   begin
@@ -332,19 +350,26 @@ begin
   if (Tab <> nil) and (Tab.View <> nil) then
     Tab.View.SetFocus;
 
-  { Offer to add a desktop launcher the first time a window appears: the plain
-    app launcher for a normal window, or a per-config launcher in app mode. }
+  { Offer to add a desktop launcher the first time a window appears — deferred
+    onto a one-shot timer so the modal dialog doesn't run nested inside OnShow. }
   if not FPromptDone then
   begin
     FPromptDone := True;
-    if FAppMode then
-    begin
-      if FAppConfig <> nil then
-        MaybePromptInstallApp(Self, FAppConfig, FAppConfigPath, FConfig);
-    end
-    else
-      MaybePromptInstall(Self, FConfig);
+    FPromptTimer.Enabled := True;
   end;
+end;
+
+procedure TTermWindow.PromptTick(Sender: TObject);
+begin
+  FPromptTimer.Enabled := False;
+  { Plain app launcher for a normal window, or a per-config launcher in app mode. }
+  if FAppMode then
+  begin
+    if FAppConfig <> nil then
+      MaybePromptInstallApp(Self, FAppConfig, FAppConfigPath, FConfig);
+  end
+  else
+    MaybePromptInstall(Self, FConfig);
 end;
 
 function TTermWindow.AddTab(AController: TTerminalController;
@@ -712,8 +737,28 @@ end;
   free the view here (that frees the timer we're running inside) — queue it and
   tear it down from our own one-shot timer, after this event has returned. }
 procedure TTermWindow.ViewShellExit(Sender: TObject);
+var
+  Tab: TTermTab;
 begin
-  QueueDispose(TabForView(Sender));
+  Tab := TabForView(Sender);
+  { App mode: the hosted program's exit is what ends the app, so remember its
+    exit code for MainProc to relay as our own exit status. }
+  if FAppMode and (Tab <> nil) and (Tab.Controller <> nil) then
+  begin
+    FAppExited := True;
+    FAppExitCode := Tab.Controller.ChildExitCode;
+  end;
+  QueueDispose(Tab);
+end;
+
+class function TTermWindow.AppProgramExited: Boolean;
+begin
+  Result := FAppExited;
+end;
+
+class function TTermWindow.AppProgramExitCode: Integer;
+begin
+  Result := FAppExitCode;
 end;
 
 { Defer a tab's teardown to the one-shot timer so it never runs synchronously

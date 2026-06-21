@@ -35,6 +35,7 @@ type
     function BuildEnvp: PPChar;
     procedure FreeEnvp(AEnvp: PPChar; ACount: Integer);
     procedure InternalCloseMaster;
+    procedure RecordExit(AStatus: cint);
   public
     constructor Create(ACore: TTerminalCore; AParser: TTerminalParser); override;
     destructor Destroy; override;
@@ -179,6 +180,16 @@ begin
   end;
 end;
 
+{ Translate a reaped wait status into FExitCode: the process exit code, or
+  128+signal if the child was killed. }
+procedure TTerminalBackendUnix.RecordExit(AStatus: cint);
+begin
+  if wifexited(AStatus) then
+    FExitCode := wexitstatus(AStatus)
+  else if wifsignaled(AStatus) then
+    FExitCode := 128 + wtermsig(AStatus);
+end;
+
 function TTerminalBackendUnix.StartShell(const AShell: string; const AArgs: array of string): Boolean;
 var
   ShellPath: string;
@@ -230,6 +241,7 @@ begin
     end;
 
     FChildPID := PID;
+    FExitCode := -1;            { fresh child; no status yet }
     FActive := True;
     SetNonBlocking(FMasterFD);
     Result := True;
@@ -250,7 +262,8 @@ begin
       key-driven shutdown policies rely on this). }
     if FShutdownSignal > 0 then
       fpKill(FChildPID, FShutdownSignal);
-    fpWaitPid(FChildPID, @Status, WNOHANG);
+    if fpWaitPid(FChildPID, @Status, WNOHANG) = FChildPID then
+      RecordExit(Status);
     FChildPID := 0;
   end;
   InternalCloseMaster;
@@ -322,6 +335,15 @@ begin
     end
     else if ReadCount = 0 then
     begin
+      { PTY EOF: the child closed the slave — it has exited (or is about to).
+        Reap it (blocking; it's effectively gone) to capture the exit code, and
+        clear FChildPID before Stop so Stop never signals a now-reusable PID. }
+      if FChildPID > 0 then
+      begin
+        if fpWaitPid(FChildPID, @Status, 0) = FChildPID then
+          RecordExit(Status);
+        FChildPID := 0;
+      end;
       Stop;
       Break;
     end
@@ -339,7 +361,11 @@ begin
 
   if FChildPID > 0 then
     if fpWaitPid(FChildPID, @Status, WNOHANG) = FChildPID then
+    begin
+      RecordExit(Status);
+      FChildPID := 0;
       Stop;
+    end;
 end;
 
 function TTerminalBackendUnix.WriteInput(const AData: RawByteString): Integer;
@@ -391,6 +417,8 @@ begin
   if Result and (FChildPID > 0) then
     if fpWaitPid(FChildPID, @Status, WNOHANG) = FChildPID then
     begin
+      RecordExit(Status);
+      FChildPID := 0;
       Stop;
       Result := False;
     end;

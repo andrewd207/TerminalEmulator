@@ -162,6 +162,10 @@ begin
     TTermWindow.FreeAll;
     Cfg.Free;
   end;
+  { App mode: if the hosted program's own exit ended the app, relay its exit
+    code as ours (so a launching script / shell sees it). }
+  if TTermWindow.AppProgramExited and (TTermWindow.AppProgramExitCode >= 0) then
+    ExitCode := TTermWindow.AppProgramExitCode;
 end;
 
 begin

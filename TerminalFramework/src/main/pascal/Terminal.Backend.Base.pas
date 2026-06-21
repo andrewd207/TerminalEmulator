@@ -28,6 +28,7 @@ type
     FTermProgram: string;
     FTermName: string;
     FShutdownSignal: Integer;
+    FExitCode: Integer;
   public
     class function CreateDefaultBackend(ACore: TTerminalCore; AParser: TTerminalParser): TTerminalBackendBase;
     constructor Create(ACore: TTerminalCore; AParser: TTerminalParser); virtual;
@@ -58,6 +59,9 @@ type
       ordinary tabs behave as before; set to 0 to skip the explicit kill and let
       closing the PTY master deliver SIGHUP/EOF naturally. }
     property ShutdownSignal: Integer read FShutdownSignal write FShutdownSignal;
+    { The child's exit status once it has been reaped: a process exit code, or
+      128+signal if it was killed.  -1 until the child has exited. }
+    property ExitCode: Integer read FExitCode;
   end;
 
 implementation
@@ -79,6 +83,7 @@ begin
   FTermProgram := 'fpc-terminal';
   FTermName := 'xterm-256color';
   FShutdownSignal := 15;   { SIGTERM }
+  FExitCode := -1;
 end;
 
 destructor TTerminalBackendBase.Destroy;

@@ -799,8 +799,10 @@ begin
   end;
   SyncSizeToController;
   { Run through the shell so the user can write a full command line (args,
-    pipes, env) and still get a PTY-backed child. }
-  FController.StartCommand('/bin/sh', ['-c', ACmdLine]);
+    pipes, env) and still get a PTY-backed child.  argv MUST include argv[0]
+    (the program name) — otherwise sh is exec'd with argv[0]='-c', treats the
+    command as a filename, and exits 2 immediately. }
+  FController.StartCommand('/bin/sh', ['/bin/sh', '-c', ACmdLine]);
   SyncSizeToController;
 end;
 

@@ -345,8 +345,9 @@ begin
   end;
   SyncSizeToController;
   { Through the shell so a full command line (args, pipes, env) still gets a
-    PTY-backed child. }
-  FController.StartCommand('/bin/sh', ['-c', ACmdLine]);
+    PTY-backed child.  argv MUST include argv[0] — otherwise sh is exec'd with
+    argv[0]='-c', treats the command as a filename, and exits 2 immediately. }
+  FController.StartCommand('/bin/sh', ['/bin/sh', '-c', ACmdLine]);
   SyncSizeToController;
 end;
 
