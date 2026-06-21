@@ -12,6 +12,7 @@ program ExampleTerminal;
 {$mode objfpc}{$H+}
 
 uses
+  {$IFDEF UNIX}cthreads,{$ENDIF}   // MUST be first: the fpGUI Wayland backend is threaded
   Classes,
   SysUtils,
   fpg_base,

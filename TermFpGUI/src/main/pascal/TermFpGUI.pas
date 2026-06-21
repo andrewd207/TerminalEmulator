@@ -17,6 +17,7 @@ program TermFpGUI;
 {$mode objfpc}{$H+}
 
 uses
+  {$IFDEF UNIX}cthreads,{$ENDIF}   // MUST be first: the fpGUI Wayland backend is threaded
   SysUtils,
   fpg_main, fpg_stylemanager,
   { Pulling these units in registers their styles with fpgStyleManager so the
