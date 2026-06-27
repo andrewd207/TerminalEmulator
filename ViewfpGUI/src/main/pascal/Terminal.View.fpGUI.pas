@@ -2289,6 +2289,15 @@ var
   HadSelection: Boolean;
   ClickHandled: Boolean;
 begin
+  { Claim keyboard focus on every click. We must call SetFocus (not just the
+    inherited HandleLMouseDown): when focus has moved to another widget, our
+    parent's ActiveWidget pointer can still stale-point at us, so the inherited
+    `Parent.ActiveWidget := self` would early-exit and never re-focus. SetFocus
+    -> HandleSetFocus walks the chain UP unconditionally, reaching the form where
+    the active branch actually differs and switching keyboard input back to us.
+    Guarded on Focused so an already-focused click doesn't re-fire OnEnter. }
+  if not Focused then
+    SetFocus;
   { Close any open context menu first. fpGUI on Windows doesn't always
     dismiss popups on a click into the owning widget. }
   if (FContextMenu <> nil) and (FContextMenu.Window <> nil)
