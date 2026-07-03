@@ -159,15 +159,22 @@ begin
   end;
 end;
 
+{ ACount is ignored: BuildEnvp grows the list by however many of TERM/
+  COLORTERM/TERM_PROGRAM/FORCE_HYPERLINK were absent (0..4), so no caller-side
+  count is reliable. The array is nil-terminated, so walk to the terminator —
+  trusting a wrong count over-reads past it and disposes a garbage pointer. }
 procedure TTerminalBackendUnix.FreeEnvp(AEnvp: PPChar; ACount: Integer);
 var
   I: Integer;
 begin
   if AEnvp = nil then
     Exit;
-  for I := 0 to ACount - 1 do
-    if AEnvp[I] <> nil then
-      StrDispose(AEnvp[I]);
+  I := 0;
+  while AEnvp[I] <> nil do
+  begin
+    StrDispose(AEnvp[I]);
+    Inc(I);
+  end;
   FreeMem(AEnvp);
 end;
 
