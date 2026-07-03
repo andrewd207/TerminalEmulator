@@ -233,6 +233,10 @@ type
     procedure HandleRMouseDown(x, y: integer; shiftstate: TShiftState); override;
     procedure HandleShow; override;
     procedure HandleMouseScroll(x, y: integer; shiftstate: TShiftState; delta: smallint); override;
+    { Focus changes swap the cursor between a solid block (focused) and a hollow
+      outline (unfocused), so repaint on both edges. }
+    procedure HandleSetFocus; override;
+    procedure HandleKillFocus; override;
   public
     constructor Create(AOwner: TComponent); override;
     destructor Destroy; override;
@@ -990,6 +994,18 @@ begin
     FCursorBlinkVisible := not FCursorBlinkVisible;
     Repaint;
   end;
+end;
+
+procedure TTerminalFPGUIView.HandleSetFocus;
+begin
+  inherited HandleSetFocus;
+  Repaint;   { swap the hollow outline back to a solid blinking block }
+end;
+
+procedure TTerminalFPGUIView.HandleKillFocus;
+begin
+  inherited HandleKillFocus;
+  Repaint;   { swap the solid block for a static hollow outline }
 end;
 
 
@@ -1970,8 +1986,7 @@ var
   Cell: TTermCell;
   R: TfpgRect;
 begin
-  if (FController = nil) or (not FController.Core.Cursor.Visible)
-     or (not FCursorBlinkVisible) then
+  if (FController = nil) or (not FController.Core.Cursor.Visible) then
     Exit;
   CursorVirtualRow := FController.Core.HistoryCount + FController.Core.Cursor.Row;
   CursorViewRow := CursorVirtualRow - FTopRow;
@@ -1980,6 +1995,32 @@ begin
   { Don't draw the main cursor under the drawer overlay. }
   if RectHitsReserved(FController.Core.Cursor.Col * FCharWidth,
        CursorViewRow * FCharHeight, FCharWidth, FCharHeight) then
+    Exit;
+
+  { Unfocused: a static, unfilled 1px outline (no blink) so it's clear the
+    terminal won't take keystrokes — shaped to match the cursor style: a hollow
+    box for csBlock, a dotted underline for csUnderscore. The glyph is already
+    baked into the grid cache, so it shows through. }
+  if not Focused then
+  begin
+    R := CellRect(FController.Core.Cursor.Col, CursorViewRow);
+    Canvas.Color := $00A0A0A0;
+    case FCursorStyle of
+      csUnderscore:
+        begin
+          Canvas.SetLineStyle(1, lsDot);
+          Canvas.DrawLine(R.Left, R.Top + FCharHeight - 1,
+                          R.Left + FCharWidth, R.Top + FCharHeight - 1);
+          Canvas.SetLineStyle(1, lsSolid);
+        end;
+      else
+        Canvas.DrawRectangle(R.Left, R.Top, FCharWidth, FCharHeight);
+    end;
+    Exit;
+  end;
+
+  { Focused: solid block / underscore that blinks. }
+  if not FCursorBlinkVisible then
     Exit;
 
   case FCursorStyle of
